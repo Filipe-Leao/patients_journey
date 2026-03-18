@@ -33,7 +33,8 @@ def case_report_load(config):
 #text generation by gemini api
 def generate_text_with_gemini(prompt, config):
     genai.configure(api_key=config["API_KEY"])
-    model = genai.GenerativeModel("gemini-1.5-flash")  # Or use gemini-1.5-flash if required
+    #print("Available models: ", [model.name for model in genai.list_models()])
+    model = genai.GenerativeModel("models/gemini-3.1-flash-lite-preview")  # Or use gemini-1.5-flash if required
     response = model.generate_content(prompt)
     return response.text
 

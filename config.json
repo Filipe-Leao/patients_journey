@@ -1,17 +1,16 @@
 {
   
   "GEN_LANGUAGE":"European Portugues *(NOT BRAZILIAN PORTUGUESE)*",
-  "CASE_REPORT_CSV_PATH":"/home/munna/cn_coding/patients_journey/patients_journey_pipeline/data/pt_clinical_case_285.csv",
+  "CASE_REPORT_CSV_PATH":"./data/pt_clinical_case_285.csv",
   "CASE_REPORT_COLUMN_NAME":"Clinical_Narrative",
   "NER_MODEL":"portugueseNLP/medialbertina_pt-pt_900m_NER",
   "GENERATED_REPORT_TYPE":"all",
   "SCORING":"yes",
   "PT_CLASSIFYING":"NO",
   "CLUSTERING":"yes",
-  "N_CLUSTER":"10",
-  "N_TESTING_ROW":"all",
-  "OUTPUT_PATH":"/home/munna/cn_coding/patients_journey/patients_journey_pipeline/output/",
+  "N_CLUSTER":"2",
+  "N_TESTING_ROW":2,
+  "OUTPUT_PATH":"./output/",
   "GPU":"YES",
-  "API_KEY":"AIzaSyCl-yHa54OdEIPKLY_U4b1-QTUaGjOFJdk"
-
+  "API_KEY":""
 }

@@ -22,6 +22,7 @@ def evaluator(config):
     """
     # Load the input data from a specified CSV file
     gen_data = pd.read_csv(config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
+    torch.cuda.empty_cache()  # Clear GPU cache to free up memory
 
     # Handling a subset of data based on the configuration
     if isinstance(config["N_TESTING_ROW"], int):  # Check if it's an integer
@@ -51,30 +52,48 @@ def evaluator(config):
 
     def ner_similarity(ner1, ner2):
         """
-        Checks if all named entities in ner2 exist in ner1.
-        If true, returns 1. Otherwise, calculates the percentage of ner2 entities present in ner1.
+        Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
+        If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
 
         Parameters:
         - ner1: List of named entities, where each entity is a dictionary with an 'entity' key.
         - ner2: List of named entities, where each entity is a dictionary with an 'entity' key.
 
         Returns:
-        - 1 if all entities in ner2 exist in ner1.
-        - A float value representing the percentage of ner2 entities found in ner1 if not all match.
+        - list of 2 values:
+            1st value:
+                - 1 if all entities in ner2 exist in ner1.
+                - A float value representing the percentage of ner2 entities found in ner1 if not all match.
+            2st value:
+                - 1 if all entities in ner1 exist in ner2.
+                - A float value representing the percentage of ner1 entities found in ner2 if not all match.
         """
         # Extract the entity names from ner1 and ner2
         entities1 = {entity.get('entity', 'O') for entity in ner1}  # Use a set for faster lookups
         entities2 = {entity.get('entity', 'O') for entity in ner2}
+
+        percentage_ner1 = 0
+        percentage_ner2 = 0
         
+        # Check if all entities in ner1 exist in ner2
+        if entities1.issubset(entities2):
+            percentage_ner1 = 1  # All entities in ner1 exist in ner2
+
         # Check if all entities in ner2 exist in ner1
         if entities2.issubset(entities1):
-            return 1  # All entities in ner2 exist in ner1
-        
-        # Calculate the percentage of ner2 entities found in ner1
-        matching_entities = entities1.intersection(entities2)
-        percentage = len(matching_entities) / len(entities2) if entities2 else 0
-        return percentage
+            percentage_ner2 = 1 # All entities in ner2 exist in ner1
+            return percentage_ner1, percentage_ner2
+ 
+        # Calculate the percentage of ner1 entities found in ner2
+        matching_entities_ner1 = entities2.intersection(entities1)
+        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
 
+       
+        # Calculate the percentage of ner2 entities found in ner1
+        matching_entities_ner2 = entities1.intersection(entities2)
+        percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
+
+        return percentage_ner1, percentage_ner2
     
     '''
     # Function to calculate similarity between two sets of named entities
@@ -146,9 +165,13 @@ def evaluator(config):
 
                 # Append the results for this row to the results list
                 results.append({
-                    'admission_ner_completeness': ner_similarity_admission,
-                    'discharge_ner_completeness': ner_similarity_discharge,
-                    'full_journey_ner_completeness': ner_similarity_journey,
+                    'admission_ner1_completeness': ner_similarity_admission[0],
+                    'discharge_ner1_completeness': ner_similarity_discharge[0],
+                    'full_journey_ner1_completeness': ner_similarity_journey[0],
+
+                    'admission_ner2_completeness': ner_similarity_admission[1],
+                    'discharge_ner2_completeness': ner_similarity_discharge[1],
+                    'full_journey_ner2_completeness': ner_similarity_journey[1],
 
                     'bert_score_admission': bert_score_admission,
                     'bert_score_discharge': bert_score_discharge,
@@ -162,9 +185,13 @@ def evaluator(config):
             except KeyError as e:
                 print(f"Warning: Column {e} not found in DataFrame for row {index}. Skipping.")
                 results.append({
-                    'admission_ner_similarity': np.nan,
-                    'discharge_ner_similarity': np.nan,
-                    'full_journey_ner_similarity': np.nan,
+                    'admission_ner1_similarity': np.nan,
+                    'discharge_ner1_similarity': np.nan,
+                    'full_journey_ner1_similarity': np.nan,
+
+                    'admission_ner2_similarity': np.nan,
+                    'discharge_ner2_similarity': np.nan,
+                    'full_journey_ner2_similarity': np.nan,
 
                     'bert_score_admission': None,
                     'bert_score_discharge': None,
