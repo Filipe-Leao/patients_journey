@@ -27,7 +27,9 @@ def device(config):
 
 #CASE REPORT LOADED
 def case_report_load(config):
-    return pd.read_csv(config["CASE_REPORT_CSV_PATH"])
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"])
+    return pd.read_csv(file_path)
 
 
 #text generation by gemini api
@@ -126,7 +128,7 @@ def admission_report_generation(config):
             """
             #, not Brazilian Portuguese,
             
-            report = generate_text_with_local_model(prompt, config)
+            report = generate_text_with_local_modelmakedirs(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated Admission  Report:
@@ -138,18 +140,26 @@ def admission_report_generation(config):
                 case_report.loc[index, 'syn_admission_report'] = "Report generation failed" # Handle cases where summary generation fails
 
             # Save the DataFrame with the new summary column
-            updated_file_path = config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv"
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+            
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
+            updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
             case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
-
-            updated_file_path_output = config["OUTPUT_PATH"]+"/synthetic_admission_report.csv"
+            print(f"Done: {updated_file_path}")
+            
+            updated_file_path_output = os.path.join(output_path, "synthetic_admission_report.csv")
             case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
+            print(f"Done: {updated_file_path_output}")
     print(f"DataFrame with summaries saved to: {updated_file_path}")
 
 #DISCHARGE REPORT GEN
 
 def discharge_report_generation(config):
-
-    case_report=pd.read_csv(config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    case_report = pd.read_csv(file_path)
     # Example usage with your DataFrame
     for index, row in case_report.iterrows():
         clinical_narrative = row[config["CASE_REPORT_COLUMN_NAME"]]
@@ -172,7 +182,7 @@ def discharge_report_generation(config):
             And feels authentic, mimicking how a doctor might write the discharge scenario. 
             Also, remember that doctors can make simple mistakes while writing (e.g., typographical mistakes).
             """
-            report = generate_text_with_local_model(prompt, config)
+            report = generate_text_with_local_modelmakedirs(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
                 \nGenerated Discharge Report:
@@ -183,12 +193,18 @@ def discharge_report_generation(config):
             else:
                 case_report.loc[index, 'syn_discharge_report'] = "Report generation failed" # Handle cases where summary generation fails
 
-            # Save the DataFrame with the new summary column
-            updated_file_path =config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv"
+            BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+            output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+            
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
+            updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
             case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
-
-            updated_file_path_output = config["OUTPUT_PATH"]+"/synthetic_discharge_report.csv"
+            print(f"Done: {updated_file_path}")
+            
+            updated_file_path_output = os.path.join(output_path, "synthetic_discharge_report.csv")
             case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
+            print(f"Done: {updated_file_path_output}")
     print(f"DataFrame with summaries saved to: {updated_file_path}")
 
 
@@ -197,8 +213,9 @@ def discharge_report_generation(config):
 
 
 def patients_full_journey(config):
-
-    case_report=case_report=pd.read_csv(config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    case_report=pd.read_csv(file_path)
 
     # Example usage with your DataFrame
     for index, row in case_report.iterrows():
@@ -227,7 +244,7 @@ def patients_full_journey(config):
         2. Several reports based  patients situations during stay in the hospital. The report should be in day wise.
         3. Discharge Report (do not include date in the heading and also must mention the whole day of staying in the hospital)
         """
-        report = generate_text_with_local_model(prompt, config)
+        report = generate_text_with_local_modelmakedirs(prompt, config)
 
         print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated full journey Report:
@@ -239,11 +256,18 @@ def patients_full_journey(config):
             case_report.loc[index, 'syn_full_journey'] = "full journey generation failed" 
 
         # Save the DataFrame with the new summary column
-        updated_file_path = config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv"
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
         case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
-
-        updated_file_path_output = config["OUTPUT_PATH"]+"/synthetic_full_journey_report.csv"
+        print(f"Done: {updated_file_path}")
+        
+        updated_file_path_output = os.path.join(output_path, "synthetic_full_journey_report.csv")
         case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
+        print(f"Done: {updated_file_path_output}")
 
     print(f"Finished: DataFrame with summaries saved to: {updated_file_path_output}")
 

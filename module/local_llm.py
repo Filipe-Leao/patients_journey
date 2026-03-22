@@ -5,7 +5,7 @@ import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_ID = "Qwen/Qwen3-14B"
-LOCAL_DIR = MODEL_PATH = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
+LOCAL_DIR = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
 
 print(LOCAL_DIR)
 

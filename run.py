@@ -1,10 +1,12 @@
 import json
 from module.report_generation import generator
 from module.report_evaluation import evaluator
+import os
 
 
 # Specify the path to your JSON config file
-json_file_path = "config.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+json_file_path = os.path.join(BASE_DIR,"config.json")
 
 # Open the file and load the JSON data
 with open(json_file_path, 'r') as json_file:

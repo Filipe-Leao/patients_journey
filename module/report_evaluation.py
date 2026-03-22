@@ -21,7 +21,9 @@ def evaluator(config):
     Evaluates clinical narratives using different metrics: NER, BERT score, BLEU score, clustering, and classification.
     """
     # Load the input data from a specified CSV file
-    gen_data = pd.read_csv(config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    gen_data=pd.read_csv(file_path)
     torch.cuda.empty_cache()  # Clear GPU cache to free up memory
 
     # Handling a subset of data based on the configuration
