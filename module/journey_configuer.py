@@ -88,8 +88,7 @@ def generate_text_with_local_model(prompt, config):
     
     result = pipe(messages)
     result = clean_output(result[0]["generated_text"][-1]["content"])
-    print(result)
-    
+    return result    
 
 
 #ADMISSION REPORT GEN
