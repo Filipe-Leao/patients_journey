@@ -8,8 +8,8 @@
   "SCORING":"yes",
   "PT_CLASSIFYING":"NO",
   "CLUSTERING":"yes",
-  "N_CLUSTER":"2",
-  "N_TESTING_ROW":2,
+  "N_CLUSTER":"10",
+  "N_TESTING_ROW":"all",
   "OUTPUT_PATH":"../output/Qwen/Qwen3-14B",
   "GPU":"YES",
   "API_KEY":""

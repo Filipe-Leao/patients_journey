@@ -6,6 +6,7 @@ import os
 import torch
 import re
 from transformers import pipeline
+from huggingface_hub import snapshot_download
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from bert_score import score
@@ -41,6 +42,9 @@ def generate_text_with_gemini(prompt, config):
     return response.text
 
 def load_pipeline(config):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    MODEL_ID = "Qwen/Qwen3-14B"
+    LOCAL_DIR = MODEL_PATH = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
     try:
         print("Loadin model")
         pipe = pipeline(
@@ -72,12 +76,6 @@ def generate_text_with_local_model(model, prompt, config):
         # Remove think from model output
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return text.strip()
-    
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    MODEL_ID = "Qwen/Qwen3-14B"
-    LOCAL_DIR = MODEL_PATH = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
-
-    print(LOCAL_DIR)
 
     messages = [
         {"role": "user", "content": prompt},
@@ -211,7 +209,7 @@ def discharge_report_generation(model, config):
 #FULL JOURNEY GEN
 
 
-def patients_full_journey(config):
+def patients_full_journey(model, config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
     case_report=pd.read_csv(file_path)

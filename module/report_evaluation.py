@@ -84,16 +84,16 @@ def evaluator(config):
         # Check if all entities in ner2 exist in ner1
         if entities2.issubset(entities1):
             percentage_ner2 = 1 # All entities in ner2 exist in ner1
-            return percentage_ner1, percentage_ner2
+            
  
-        # Calculate the percentage of ner1 entities found in ner2
-        matching_entities_ner1 = entities2.intersection(entities1)
-        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
+        if percentage_ner1 == 1: # Calculate the percentage of ner1 entities found in ner2
+            matching_entities_ner1 = entities2.intersection(entities1)
+            percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
 
        
-        # Calculate the percentage of ner2 entities found in ner1
-        matching_entities_ner2 = entities1.intersection(entities2)
-        percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
+        if percentage_ner2 == 2: # Calculate the percentage of ner2 entities found in ner1
+            matching_entities_ner2 = entities1.intersection(entities2)
+            percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
 
         return percentage_ner1, percentage_ner2
     
