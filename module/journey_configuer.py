@@ -47,12 +47,13 @@ def generate_text_with_local_model(prompt, config):
 
     print(LOCAL_DIR)
 
-    def load_pipeline():
+    def load_pipeline(config):
         try:
             print("Loadin model")
             pipe = pipeline(
                 "text-generation",
                 model=LOCAL_DIR,
+                device=device(config)
             )
             print("Modelo carregado localmente.")
         except Exception:
@@ -66,7 +67,8 @@ def generate_text_with_local_model(prompt, config):
             
             pipe = pipeline(
                 "text-generation",
-                model=LOCAL_DIR
+                model=LOCAL_DIR,
+                device=device(config)
             )
         
         return pipe
@@ -77,7 +79,7 @@ def generate_text_with_local_model(prompt, config):
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return text.strip()
     
-    pipe = load_pipeline()
+    pipe = load_pipeline(config)
 
     messages = [
         {"role": "user", "content": prompt},

@@ -222,7 +222,14 @@ def evaluator(config):
         # Append evaluation results to the original data
         gen_data = pd.concat([gen_data, pd.DataFrame(results)], axis=1)
         # Save the evaluated data to a CSV file
-        gen_data.to_csv(config["OUTPUT_PATH"] + "ner_bert_bleu_score_evaluation.csv", index=False)
+        
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+            
+        gen_data.to_csv(output_path + "ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nScoring Processing done..\n")
 
@@ -259,7 +266,14 @@ def evaluator(config):
         gen_data['cluster'] = kmeans.fit_predict(tfidf_matrix)
 
         # Save the results with clustering to a CSV file
-        gen_data.to_csv(config["OUTPUT_PATH"] + "cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+            
+        gen_data.to_csv(output_path + "cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nClustering Processing done..\n")
 
@@ -341,6 +355,12 @@ def evaluator(config):
         gen_data["full_journey_variant_label"] = full_journey_results.apply(lambda x: x["label"])
 
         # Save the results with PT classification to a new CSV file
-        gen_data.to_csv(config["OUTPUT_PATH"] + "PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+            
+        gen_data.to_csv(output_path + "PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nPT Classifying Processing done..\n")
