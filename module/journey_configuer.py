@@ -128,7 +128,7 @@ def admission_report_generation(config):
             """
             #, not Brazilian Portuguese,
             
-            report = generate_text_with_local_modelmakedirs(prompt, config)
+            report = generate_text_with_local_model(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated Admission  Report:
