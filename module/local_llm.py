@@ -45,7 +45,7 @@ def use_model():
         {"role": "user", "content": "Who are you?"}
     ]
 
-    result = pipe(messages)
+    result = pipe(messages, max_new_tokens=1024)
     result = clean_output(result[0]["generated_text"][-1]["content"])
     print(result)
     

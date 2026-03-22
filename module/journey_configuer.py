@@ -69,7 +69,7 @@ def generate_text_with_local_model(prompt, config):
             pipe = pipeline(
                 "text-generation",
                 model=LOCAL_DIR,
-                device=device(config)
+                device=device(config),
             )
         
         return pipe
@@ -86,7 +86,7 @@ def generate_text_with_local_model(prompt, config):
         {"role": "user", "content": prompt},
     ]
     
-    result = pipe(messages)
+    result = pipe(messages, max_new_tokens=4096)
     result = clean_output(result[0]["generated_text"][-1]["content"])
     return result    
 
