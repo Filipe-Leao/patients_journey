@@ -229,7 +229,7 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nScoring Processing done..\n")
 
@@ -273,7 +273,7 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nClustering Processing done..\n")
 
@@ -361,6 +361,6 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nPT Classifying Processing done..\n")

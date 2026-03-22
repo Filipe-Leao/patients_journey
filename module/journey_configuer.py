@@ -4,6 +4,7 @@ import pandas as pd
 import google.generativeai as genai
 import os
 import torch
+import re
 from transformers import pipeline
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
