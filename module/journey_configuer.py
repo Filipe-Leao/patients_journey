@@ -182,7 +182,7 @@ def discharge_report_generation(config):
             And feels authentic, mimicking how a doctor might write the discharge scenario. 
             Also, remember that doctors can make simple mistakes while writing (e.g., typographical mistakes).
             """
-            report = generate_text_with_local_modelmakedirs(prompt, config)
+            report = generate_text_with_local_model(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
                 \nGenerated Discharge Report:
@@ -244,7 +244,7 @@ def patients_full_journey(config):
         2. Several reports based  patients situations during stay in the hospital. The report should be in day wise.
         3. Discharge Report (do not include date in the heading and also must mention the whole day of staying in the hospital)
         """
-        report = generate_text_with_local_modelmakedirs(prompt, config)
+        report = generate_text_with_local_model(prompt, config)
 
         print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated full journey Report:
