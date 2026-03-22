@@ -10,7 +10,7 @@
   "CLUSTERING":"yes",
   "N_CLUSTER":"2",
   "N_TESTING_ROW":2,
-  "OUTPUT_PATH":"./output/",
+  "OUTPUT_PATH":"./output/Qwen/Qwen3-14B",
   "GPU":"YES",
   "API_KEY":""
 }

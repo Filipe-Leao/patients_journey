@@ -38,11 +38,57 @@ def generate_text_with_gemini(prompt, config):
     response = model.generate_content(prompt)
     return response.text
 
+def generate_text_with_local_model(prompt, config):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    MODEL_ID = "Qwen/Qwen3-14B"
+    LOCAL_DIR = MODEL_PATH = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
+
+    print(LOCAL_DIR)
+
+    def load_pipeline():
+        try:
+            print("Loadin model")
+            pipe = pipeline(
+                "text-generation",
+                model=LOCAL_DIR,
+            )
+            print("Modelo carregado localmente.")
+        except Exception:
+            print("Modelo não encontrado localmente. A fazer download...")
+            
+            snapshot_download(
+                repo_id=MODEL_ID,
+                local_dir=LOCAL_DIR,
+                local_dir_use_symlinks=False
+            )
+            
+            pipe = pipeline(
+                "text-generation",
+                model=LOCAL_DIR
+            )
+        
+        return pipe
+    
+    
+    def clean_output(text):
+        # Remove think from model output
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return text.strip()
+    
+    pipe = load_pipeline()
+
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
+    
+    result = pipe(messages)
+    result = clean_output(result[0]["generated_text"][-1]["content"])
+    print(result)
+    
+
 
 #ADMISSION REPORT GEN
 def admission_report_generation(config):
-
-
     case_report=case_report_load(config)
     if isinstance(config["N_TESTING_ROW"], int):# Check if it's an integer
         case_report=case_report[0:config["N_TESTING_ROW"]]# Use only the specified number of rows
@@ -80,7 +126,7 @@ def admission_report_generation(config):
             """
             #, not Brazilian Portuguese,
             
-            report = generate_text_with_gemini(prompt, config)
+            report = generate_text_with_local_model(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated Admission  Report:
@@ -126,7 +172,7 @@ def discharge_report_generation(config):
             And feels authentic, mimicking how a doctor might write the discharge scenario. 
             Also, remember that doctors can make simple mistakes while writing (e.g., typographical mistakes).
             """
-            report = generate_text_with_gemini(prompt, config)
+            report = generate_text_with_local_model(prompt, config)
 
             print(f"""Number of GEN:{index+1}/{len(case_report)}
                 \nGenerated Discharge Report:
@@ -181,7 +227,7 @@ def patients_full_journey(config):
         2. Several reports based  patients situations during stay in the hospital. The report should be in day wise.
         3. Discharge Report (do not include date in the heading and also must mention the whole day of staying in the hospital)
         """
-        report = generate_text_with_gemini(prompt, config)
+        report = generate_text_with_local_model(prompt, config)
 
         print(f"""Number of GEN:{index+1}/{len(case_report)}
             \nGenerated full journey Report:
