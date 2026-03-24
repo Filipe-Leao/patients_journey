@@ -5,7 +5,7 @@ import google.generativeai as genai
 import os
 import torch
 import re
-from transformers import pipeline
+from transformers import pipeline, GenerationConfig
 from huggingface_hub import snapshot_download
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
@@ -30,7 +30,14 @@ def device(config):
 def case_report_load(config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"])
-    return pd.read_csv(file_path)
+    case_report = pd.read_csv(file_path)
+    case_report['syn_admission_report'] = case_report.get('syn_admission_report', pd.NA)
+    case_report['syn_discharge_report'] = case_report.get('syn_discharge_report', pd.NA)
+    case_report['syn_full_journey'] = case_report.get('syn_full_journey', pd.NA)
+
+    case_report['syn_admission_report'] = case_report['syn_admission_report'].astype(object)
+    case_report['syn_discharge_report'] = case_report['syn_discharge_report'].astype(object)
+    case_report['syn_full_journey'] = case_report['syn_full_journey'].astype(object)
 
 
 #text generation by gemini api
@@ -50,7 +57,7 @@ def load_pipeline(config):
         pipe = pipeline(
             "text-generation",
             model=LOCAL_DIR,
-            device=device(config)
+            device=device(config),
         )
         print("Modelo carregado localmente.")
     except Exception:
@@ -73,23 +80,39 @@ def load_pipeline(config):
     
 def generate_text_with_local_model(model, prompt, config):
     def clean_output(text):
-        # Remove think from model output
+        # Remove think from model output (fallback caso ainda apareça)
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return text.strip()
 
     messages = [
+        {"role": "system", "content": "/no_think"},  # Desativa o modo de pensar
         {"role": "user", "content": prompt},
     ]
-    
-    result = model(messages, max_new_tokens=4096)
-    result = clean_output(result[0]["generated_text"][-1]["content"])
-    return result    
+
+    # Fix: usar GenerationConfig em vez de passar parâmetros soltos
+    generation_config = GenerationConfig(
+        max_new_tokens=4096,
+        temperature=0.7,
+        top_p=0.8,
+        top_k=20,
+        min_p=0.0,
+        do_sample=True,
+    )
+
+    result = model(
+        messages,
+        generation_config=generation_config,
+    )
+
+    # result = clean_output(result[0]["generated_text"][-1]["content"])
+    return result
 
 
 #ADMISSION REPORT GEN
 def admission_report_generation(model, config):
     case_report=case_report_load(config)
     if isinstance(config["N_TESTING_ROW"], int):# Check if it's an integer
+        print(config["N_TESTING_ROW"])
         case_report=case_report[0:config["N_TESTING_ROW"]]# Use only the specified number of rows
     elif config["N_TESTING_ROW"]=="all":# If it's the string "all"
         case_report # Use all rows

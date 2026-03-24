@@ -15,6 +15,98 @@ from sklearn.cluster import KMeans  # K-means clustering
 # Custom function from another module to define the device (CPU/GPU)
 from module.journey_configuer import device
 
+
+# Function to extract named entities from text using the NER pipeline
+def extract_ner(text):
+    """
+    Extracts named entities from the provided text using the NER model pipeline.
+    """
+    try:
+        return ner_pipeline(text)  # Extract entities using the NER pipeline
+    except Exception as e:
+        print(f"Error processing text: {e}")
+        return []  # If there's an error, return an empty list
+
+
+
+def ner_similarity(ner1, ner2):
+    """
+    Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
+    If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
+
+    Parameters:
+    - ner1: List of named entities, where each entity is a dictionary with an 'entity' key.
+    - ner2: List of named entities, where each entity is a dictionary with an 'entity' key.
+
+    Returns:
+    - list of 2 values:
+        1st value:
+            - 1 if all entities in ner2 exist in ner1.
+            - A float value representing the percentage of ner2 entities found in ner1 if not all match.
+        2st value:
+            - 1 if all entities in ner1 exist in ner2.
+            - A float value representing the percentage of ner1 entities found in ner2 if not all match.
+    """
+    # Extract the entity names from ner1 and ner2
+    entities1 = {entity.get('entity', 'O') for entity in ner1}  # Use a set for faster lookups
+    entities2 = {entity.get('entity', 'O') for entity in ner2}
+
+    percentage_ner1 = 0
+    percentage_ner2 = 0
+    
+    # Check if all entities in ner1 exist in ner2
+    if entities1.issubset(entities2):
+        percentage_ner1 = 1  # All entities in ner1 exist in ner2
+
+    # Check if all entities in ner2 exist in ner1
+    if entities2.issubset(entities1):
+        percentage_ner2 = 1 # All entities in ner2 exist in ner1
+        
+
+    if percentage_ner1 == 1: # Calculate the percentage of ner1 entities found in ner2
+        matching_entities_ner1 = entities2.intersection(entities1)
+        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
+
+    
+    if percentage_ner2 == 2: # Calculate the percentage of ner2 entities found in ner1
+        matching_entities_ner2 = entities1.intersection(entities2)
+        percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
+
+    return percentage_ner1, percentage_ner2
+
+'''
+# Function to calculate similarity between two sets of named entities
+def ner_similarity(ner1, ner2):
+    """
+    Calculates the similarity between two named entity sets using cosine similarity.
+    """
+    entities1 = [entity.get('entity', 'O') for entity in ner1]  # Extract the entity names from ner1
+    entities2 = [entity.get('entity', 'O') for entity in ner2]  # Extract the entity names from ner2
+    all_entities = set(entities1 + entities2)  # Combine the entities from both sets
+    vector1 = [entities1.count(entity) for entity in all_entities]  # Vector representation for ner1
+    vector2 = [entities2.count(entity) for entity in all_entities]  # Vector representation for ner2
+    if vector1 and vector2:  # Ensure both vectors are non-empty
+        return cosine_similarity([vector1], [vector2])[0][0]  # Calculate cosine similarity
+    else:
+        return 0  # Return similarity of 0 if vectors are empty
+'''
+
+# Function to calculate the average BERT score between references and candidates
+def calculate_bert_score(references, candidates):
+    """
+    Calculates BERT score (precision, recall, F1) between the reference and candidate text.
+    """
+    P, R, F1 = score(candidates, references, lang="PT", verbose=True)  # Calculate BERT score
+    return F1.mean().item()  # Return the average F1 score
+
+# Function to calculate BLEU score for text similarity
+def calculate_bleu_score(bleu, references, candidates):
+    """
+    Calculates BLEU score for the similarity between references and candidates.
+    """
+    score = bleu.sentence_score(candidates, [references])  # Calculate BLEU score
+    return score.score / 100.0  # Normalize BLEU score between 0 and 1
+
 # Main evaluation function that performs various evaluations on clinical narratives
 def evaluator(config):
     """
@@ -38,100 +130,7 @@ def evaluator(config):
     # Initialize the NER pipeline using a pre-trained model
     print("NER model:", config["NER_MODEL"])
     ner_pipeline = pipeline('ner', model=config["NER_MODEL"], aggregation_strategy='average', device=device(config))
-
-    # Function to extract named entities from text using the NER pipeline
-    def extract_ner(text):
-        """
-        Extracts named entities from the provided text using the NER model pipeline.
-        """
-        try:
-            return ner_pipeline(text)  # Extract entities using the NER pipeline
-        except Exception as e:
-            print(f"Error processing text: {e}")
-            return []  # If there's an error, return an empty list
-
-    
-
-    def ner_similarity(ner1, ner2):
-        """
-        Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
-        If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
-
-        Parameters:
-        - ner1: List of named entities, where each entity is a dictionary with an 'entity' key.
-        - ner2: List of named entities, where each entity is a dictionary with an 'entity' key.
-
-        Returns:
-        - list of 2 values:
-            1st value:
-                - 1 if all entities in ner2 exist in ner1.
-                - A float value representing the percentage of ner2 entities found in ner1 if not all match.
-            2st value:
-                - 1 if all entities in ner1 exist in ner2.
-                - A float value representing the percentage of ner1 entities found in ner2 if not all match.
-        """
-        # Extract the entity names from ner1 and ner2
-        entities1 = {entity.get('entity', 'O') for entity in ner1}  # Use a set for faster lookups
-        entities2 = {entity.get('entity', 'O') for entity in ner2}
-
-        percentage_ner1 = 0
-        percentage_ner2 = 0
-        
-        # Check if all entities in ner1 exist in ner2
-        if entities1.issubset(entities2):
-            percentage_ner1 = 1  # All entities in ner1 exist in ner2
-
-        # Check if all entities in ner2 exist in ner1
-        if entities2.issubset(entities1):
-            percentage_ner2 = 1 # All entities in ner2 exist in ner1
-            
- 
-        if percentage_ner1 == 1: # Calculate the percentage of ner1 entities found in ner2
-            matching_entities_ner1 = entities2.intersection(entities1)
-            percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
-
-       
-        if percentage_ner2 == 2: # Calculate the percentage of ner2 entities found in ner1
-            matching_entities_ner2 = entities1.intersection(entities2)
-            percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
-
-        return percentage_ner1, percentage_ner2
-    
-    '''
-    # Function to calculate similarity between two sets of named entities
-    def ner_similarity(ner1, ner2):
-        """
-        Calculates the similarity between two named entity sets using cosine similarity.
-        """
-        entities1 = [entity.get('entity', 'O') for entity in ner1]  # Extract the entity names from ner1
-        entities2 = [entity.get('entity', 'O') for entity in ner2]  # Extract the entity names from ner2
-        all_entities = set(entities1 + entities2)  # Combine the entities from both sets
-        vector1 = [entities1.count(entity) for entity in all_entities]  # Vector representation for ner1
-        vector2 = [entities2.count(entity) for entity in all_entities]  # Vector representation for ner2
-        if vector1 and vector2:  # Ensure both vectors are non-empty
-            return cosine_similarity([vector1], [vector2])[0][0]  # Calculate cosine similarity
-        else:
-            return 0  # Return similarity of 0 if vectors are empty
-    '''
-
-    # Function to calculate the average BERT score between references and candidates
-    def calculate_bert_score(references, candidates):
-        """
-        Calculates BERT score (precision, recall, F1) between the reference and candidate text.
-        """
-        P, R, F1 = score(candidates, references, lang="PT", verbose=True)  # Calculate BERT score
-        return F1.mean().item()  # Return the average F1 score
-
-    # Function to calculate BLEU score for text similarity
-    def calculate_bleu_score(references, candidates):
-        """
-        Calculates BLEU score for the similarity between references and candidates.
-        """
-        bleu = BLEU(effective_order=True)  # Initialize BLEU metric
-        score = bleu.sentence_score(candidates, [references])  # Calculate BLEU score
-        return score.score / 100.0  # Normalize BLEU score between 0 and 1
-    
-
+    bleu = BLEU(effective_order=True)  # Initialize BLEU metric
 
     if config["SCORING"].lower() == "yes":
         print("I AM SCORE")
@@ -161,19 +160,19 @@ def evaluator(config):
 
                 print("Processing BLEU score calculation")
                 # Calculate BLEU scores for text similarity
-                bleu_score_admission = calculate_bleu_score(row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
-                bleu_score_discharge = calculate_bleu_score(row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
-                bleu_score_journey = calculate_bleu_score(row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
+                bleu_score_admission = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
+                bleu_score_discharge = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
+                bleu_score_journey = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
 
                 # Append the results for this row to the results list
                 results.append({
-                    'admission_ner1_completeness': ner_similarity_admission[0],
-                    'discharge_ner1_completeness': ner_similarity_discharge[0],
-                    'full_journey_ner1_completeness': ner_similarity_journey[0],
+                    'admission_ner1_similarity': ner_similarity_admission[0],
+                    'discharge_ner1_similarity': ner_similarity_discharge[0],
+                    'full_journey_ner1_similarity': ner_similarity_journey[0],
 
-                    'admission_ner2_completeness': ner_similarity_admission[1],
-                    'discharge_ner2_completeness': ner_similarity_discharge[1],
-                    'full_journey_ner2_completeness': ner_similarity_journey[1],
+                    'admission_ner2_similarity': ner_similarity_admission[1],
+                    'discharge_ner2_similarity': ner_similarity_discharge[1],
+                    'full_journey_ner2_similarity': ner_similarity_journey[1],
 
                     'bert_score_admission': bert_score_admission,
                     'bert_score_discharge': bert_score_discharge,
@@ -206,9 +205,13 @@ def evaluator(config):
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
                 results.append({
-                    'admission_ner_similarity': np.nan,
-                    'discharge_ner_similarity': np.nan,
-                    'full_journey_ner_similarity': np.nan,
+                    'admission_ner1_similarity': np.nan,
+                    'discharge_ner1_similarity': np.nan,
+                    'full_journey_ner1_similarity': np.nan,
+
+                    'admission_ner2_similarity': np.nan,
+                    'discharge_ner2_similarity': np.nan,
+                    'full_journey_ner2_similarity': np.nan,
 
                     'bert_score_admission': None,
                     'bert_score_discharge': None,
