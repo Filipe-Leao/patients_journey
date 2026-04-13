@@ -6,18 +6,82 @@ import torch  # For deep learning models and computations
 from transformers import pipeline  # For using pre-trained models from Hugging Face
 from sklearn.metrics.pairwise import cosine_similarity  # For computing similarity between vectors
 import numpy as np  # For numerical computations
-from bert_score import score  # For evaluating text similarity using BERT embeddings
+from bert_score import score, BERTScorer  # For evaluating text similarity using BERT embeddings
 from sacrebleu.metrics import BLEU  # For BLEU score calculation (text similarity evaluation)
 from sklearn.feature_extraction.text import TfidfVectorizer  # For text vectorization using TF-IDF
 from sklearn.cluster import DBSCAN  # Density-based clustering
 from sklearn.cluster import KMeans  # K-means clustering
+from huggingface_hub import snapshot_download
 
 # Custom function from another module to define the device (CPU/GPU)
 from module.journey_configuer import device
 
+def load_ner(config):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    MODEL_ID = config["NER_MODEL"]
+    LOCAL_DIR = os.path.join(BASE_DIR, f"../../models/{MODEL_ID}")
+    try:
+        print("Loadin ner model")
+        ner = pipeline('ner', model=LOCAL_DIR, aggregation_strategy='average', device=device(config))
+        print("Modelo ner carregado localmente.")
+    except Exception:
+        print("Modelo ner não encontrado localmente. A fazer download...")
+        
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=LOCAL_DIR,
+            local_dir_use_symlinks=False
+        )
+        
+        ner = pipeline('ner', model=LOCAL_DIR, aggregation_strategy='average', device=device(config))
+        print("Modelo ner carregado localmente.")
+    
+    return ner
+
+
+def load_bert(config):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    MODEL_ID = "google-bert/bert-base-multilingual-cased"
+    LOCAL_DIR = os.path.join(BASE_DIR, "../../models/google-bert/bert-base-multilingual-cased")
+    try:
+        print("Loadin model")
+        scorer = BERTScorer(
+            model_type=LOCAL_DIR, 
+            device=device(config),
+            lang="PT",
+            num_layers=9,               # camada ótima para BERT-base
+            #idf=True,
+            #idf_sents=corpus,
+            batch_size=32,              # reduz se tiveres pouca RAM/VRAM
+            rescale_with_baseline=False, # True só funciona para modelos conhecidos do HF
+            
+        )
+        print("Modelo carregado localmente.")
+    except Exception:
+        print("Modelo não encontrado localmente. A fazer download...")
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=LOCAL_DIR,
+            ignore_patterns=["*.msgpack", "*.h5", "flax_model*"],  # ignora pesos não PyTorch
+        )
+        print("Loadin model")
+        scorer = BERTScorer(
+            model_type=LOCAL_DIR, 
+            device=device(config),
+            lang="PT",
+            num_layers=9,               # camada ótima para BERT-base
+            #idf=True,
+            #idf_sents=corpus,
+            batch_size=32,              # reduz se tiveres pouca RAM/VRAM
+            rescale_with_baseline=False # True só funciona para modelos conhecidos do HF
+        )
+        print("Modelo carregado localmente.")
+    
+    return scorer
+
 
 # Function to extract named entities from text using the NER pipeline
-def extract_ner(text):
+def extract_ner(ner_pipeline, text):
     """
     Extracts named entities from the provided text using the NER model pipeline.
     """
@@ -48,29 +112,23 @@ def ner_similarity(ner1, ner2):
             - A float value representing the percentage of ner1 entities found in ner2 if not all match.
     """
     # Extract the entity names from ner1 and ner2
-    entities1 = {entity.get('entity', 'O') for entity in ner1}  # Use a set for faster lookups
-    entities2 = {entity.get('entity', 'O') for entity in ner2}
-
-    percentage_ner1 = 0
-    percentage_ner2 = 0
+    entities1 = {entity.get('word', 'O') for entity in ner1}  # Use a set for faster lookups
+    entities2 = {entity.get('word', 'O') for entity in ner2}
     
-    # Check if all entities in ner1 exist in ner2
-    if entities1.issubset(entities2):
-        percentage_ner1 = 1  # All entities in ner1 exist in ner2
+    print(f"Entidades ner1: {ner1}\nEntidades ner2: {ner2}")
 
-    # Check if all entities in ner2 exist in ner1
-    if entities2.issubset(entities1):
-        percentage_ner2 = 1 # All entities in ner2 exist in ner1
+    print(f"\n\nEntidades ner1: {entities1}\nEntidades ner2: {entities2}")    
+
+    # Calculate the percentage of ner1 entities found in ner2
+    matching_entities_ner1 = entities2.intersection(entities1)
+    percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
+
+    
+    # Calculate the percentage of ner2 entities found in ner1
+    matching_entities_ner2 = entities1.intersection(entities2)
+    percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
         
-
-    if percentage_ner1 == 1: # Calculate the percentage of ner1 entities found in ner2
-        matching_entities_ner1 = entities2.intersection(entities1)
-        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
-
-    
-    if percentage_ner2 == 2: # Calculate the percentage of ner2 entities found in ner1
-        matching_entities_ner2 = entities1.intersection(entities2)
-        percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
+    print(f"\nNer1 in ner2: {percentage_ner1} Ner2 in ner1: {percentage_ner2}")
 
     return percentage_ner1, percentage_ner2
 
@@ -92,11 +150,11 @@ def ner_similarity(ner1, ner2):
 '''
 
 # Function to calculate the average BERT score between references and candidates
-def calculate_bert_score(references, candidates):
+def calculate_bert_score(bert, references, candidates):
     """
     Calculates BERT score (precision, recall, F1) between the reference and candidate text.
     """
-    P, R, F1 = score(candidates, references, lang="PT", verbose=True)  # Calculate BERT score
+    P, R, F1 = bert.score(candidates, references, verbose=True)  # Calculate BERT score
     return F1.mean().item()  # Return the average F1 score
 
 # Function to calculate BLEU score for text similarity
@@ -107,6 +165,7 @@ def calculate_bleu_score(bleu, references, candidates):
     score = bleu.sentence_score(candidates, [references])  # Calculate BLEU score
     return score.score / 100.0  # Normalize BLEU score between 0 and 1
 
+
 # Main evaluation function that performs various evaluations on clinical narratives
 def evaluator(config):
     """
@@ -115,6 +174,7 @@ def evaluator(config):
     # Load the input data from a specified CSV file
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4]+"_new.csv")
+    file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
     gen_data=pd.read_csv(file_path)
     torch.cuda.empty_cache()  # Clear GPU cache to free up memory
 
@@ -129,8 +189,9 @@ def evaluator(config):
     
     # Initialize the NER pipeline using a pre-trained model
     print("NER model:", config["NER_MODEL"])
-    ner_pipeline = pipeline('ner', model=config["NER_MODEL"], aggregation_strategy='average', device=device(config))
+    ner_pipeline = load_ner(config)
     bleu = BLEU(effective_order=True)  # Initialize BLEU metric
+    bert = load_bert(config)
 
     if config["SCORING"].lower() == "yes":
         print("I AM SCORE")
@@ -140,12 +201,13 @@ def evaluator(config):
         # Iterate over the rows of the data to perform evaluations
         for index, row in gen_data.iterrows():  # Limit processing to 5 rows for demonstration
             try:
+                print(f"Processing Patient {index}/{len(gen_data)}")
                 print("Processing NER calculation")
                 # Extract named entities from various text columns
-                admission_ner = extract_ner(row['syn_admission_report'])
-                discharge_ner = extract_ner(row['syn_discharge_report'])
-                clinical_ner = extract_ner(row[config["CASE_REPORT_COLUMN_NAME"]])
-                journey_ner = extract_ner(row['syn_full_journey'])
+                admission_ner = extract_ner(ner_pipeline, row['syn_admission_report'])
+                discharge_ner = extract_ner(ner_pipeline, row['syn_discharge_report'])
+                clinical_ner = extract_ner(ner_pipeline, row[config["CASE_REPORT_COLUMN_NAME"]])
+                journey_ner = extract_ner(ner_pipeline, row['syn_full_journey'])
 
                 # Calculate NER-based similarity scores
                 ner_similarity_admission = ner_similarity(clinical_ner, admission_ner)
@@ -154,9 +216,9 @@ def evaluator(config):
 
                 print("Processing BERT score calculation")
                 # Calculate BERT scores for text similarity
-                bert_score_admission = calculate_bert_score([row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_admission_report']])
-                bert_score_discharge = calculate_bert_score([row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_discharge_report']])
-                bert_score_journey = calculate_bert_score([row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_full_journey']])
+                bert_score_admission = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_admission_report']])
+                bert_score_discharge = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_discharge_report']])
+                bert_score_journey = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_full_journey']])
 
                 print("Processing BLEU score calculation")
                 # Calculate BLEU scores for text similarity
@@ -232,7 +294,7 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "/ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/" + file_name +  "_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nScoring Processing done..\n")
 
@@ -276,7 +338,7 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "/cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/" + file_name + "_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nClustering Processing done..\n")
 
@@ -364,6 +426,6 @@ def evaluator(config):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
-        gen_data.to_csv(output_path + "/PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
+        gen_data.to_csv(output_path + "/" + file_name + "_PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
 
         print("\nPT Classifying Processing done..\n")

@@ -10,5 +10,8 @@ def generator(config):
         admission_report_generation(model, config)
     else:
         admission_report_generation(model, config)
+        print("Admission Done")
         discharge_report_generation(model, config)
+        print("Discharge Done")
         patients_full_journey(model, config)
+        print("Full journey Done")
