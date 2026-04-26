@@ -48,19 +48,19 @@ def load_pipeline(config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     MODEL_ID = "Qwen/Qwen3-14B"
     LOCAL_DIR = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
+    num_gpus = 2
     
     try:                    
         return LLM(
             model=LOCAL_DIR,
-            #quantization="awq",           # remove se usares BF16
+            tensor_parallel_size=num_gpus,
             dtype="auto",
-            max_model_len=8192,
+            max_model_len=32000,           # cover 24 146 + some headroom for output
             gpu_memory_utilization=0.92,
-            tensor_parallel_size=1,
-            enable_prefix_caching=True,   # cache do "/no_think" system prompt → speedup grátis
-            max_num_batched_tokens=16384,
-            max_num_seqs=512,
-            #disable_log_requests=True,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
+            max_num_batched_tokens=4096,   # chunk size, keeps memory flat
+            max_num_seqs=32,               # ← reduce from 512, long ctx × 512 = OOM
         )
     except:
         print("Modelo não encontrado localmente. A fazer download...")
@@ -73,15 +73,14 @@ def load_pipeline(config):
         
         return LLM(
             model=LOCAL_DIR,
-            #quantization="awq",           # remove se usares BF16
+            tensor_parallel_size=num_gpus,
             dtype="auto",
-            max_model_len=8192,
+            max_model_len=32000,           # cover 24 146 + some headroom for output
             gpu_memory_utilization=0.92,
-            tensor_parallel_size=1,
-            enable_prefix_caching=True,   # cache do "/no_think" system prompt → speedup grátis
-            max_num_batched_tokens=16384,
-            max_num_seqs=512,
-            #disable_log_requests=True,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
+            max_num_batched_tokens=4096,   # chunk size, keeps memory flat
+            max_num_seqs=32,               # ← reduce from 512, long ctx × 512 = OOM
         )
         
 
@@ -94,9 +93,9 @@ def generate_text_with_local_model_batch(
 
     sampling_params = SamplingParams(
         max_tokens=4096,
-        temperature=0.7,
-        top_p=0.8,
-        top_k=20,
+        temperature=0.3,
+        top_p=0.95,
+        top_k=0,
         min_p=0.0,
     )
 
@@ -119,6 +118,10 @@ def generate_text_with_local_model_batch(
 
     return [out.outputs[0].text.strip() for out in outputs]
 
+def clean_output(text):
+    # Remove <think> and </think> from model output
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
 
 def admission_report_generation(model, config):
     def generate_report(index, clinical_narrative, config):
@@ -157,7 +160,9 @@ def admission_report_generation(model, config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
     updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
-    updated_file_path_output = os.path.join(output_path, "synthetic_admission_report.csv")
+    file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
+
+    updated_file_path_output = os.path.join(output_path, file_name + "_synthetic_admission_report.csv")
     file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
 
     if not os.path.exists(output_path):
@@ -216,41 +221,21 @@ def admission_report_generation(model, config):
     print(f"A gerar {len(prompts)} reports...")
     
     valid_indices = list(valid_rows.keys())
-    size = 1000
-    for i in range(0, len(prompts), size):
-        batch_prompts  = prompts[i:i+size]
-        batch_indices  = valid_indices[i:i+size]
 
-        reports = generate_text_with_local_model_batch(model, batch_prompts, config)
+    reports = generate_text_with_local_model_batch(model, prompts, config)
 
-        for i_local, (index, report) in enumerate(zip(batch_indices, reports)):
-            print(f"GEN: {i + i_local + 1}/{len(prompts)}\n{report}")
-            case_report.loc[index, 'syn_admission_report'] = report or "Report generation failed"
+    for i, (index, report) in enumerate(zip(valid_indices, reports)):
+        print(f"GEN: {i + 1}/{len(prompts)}")
+        report = clean_output(report)
+        case_report.loc[index, 'syn_admission_report'] = report or "Report generation failed"
 
-        case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
-        case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
-        print(f"Checkpoint guardado: {i + len(batch_prompts)}/{len(prompts)}")
+    case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
+    case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
 
 #DISCHARGE REPORT GEN
 def discharge_report_generation(model, config):
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
-    case_report = pd.read_csv(file_path)
-    file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
-
-    output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-
-    # Recolhe todos os prompts primeiro
-    prompts = []
-    indices = []
-
-    for index, row in case_report.iterrows():
-        clinical_narrative = row[config["CASE_REPORT_COLUMN_NAME"]]
-        admission_report = row['syn_admission_report']
-        if clinical_narrative:
-            prompt = f"""
+    def generate_report(index, clinical_narrative, admission_report, config):
+        prompt = f"""
             "{clinical_narrative}" and "{admission_report}"
 
             Based on the information above, write a realistic medical discharge report in {config["GEN_LANGUAGE"]} 
@@ -267,29 +252,9 @@ def discharge_report_generation(model, config):
             And feels authentic, mimicking how a doctor might write the discharge scenario. 
             Also, remember that doctors can make simple mistakes while writing (e.g., typographical mistakes).
             """
-            prompts.append(prompt)
-            indices.append(index)
-        else:
-            case_report.loc[index, 'syn_discharge_report'] = "Report generation failed"
+            
+        return index, prompt
 
-    # Gera todos os reports de uma vez (batch)
-    print(f"A gerar {len(prompts)} discharge reports...")
-    reports = generate_text_with_local_model_batch(model, prompts, config)
-
-    # Guarda os resultados
-    for index, report in zip(indices, reports):
-        print(f"GEN: {indices.index(index)+1}/{len(prompts)}\n{report}")
-        case_report.loc[index, 'syn_discharge_report'] = report if report else "Report generation failed"
-
-    # Guarda o CSV apenas uma vez no final
-    updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
-    updated_file_path_output = os.path.join(output_path, file_name + "_synthetic_discharge_report.csv")
-    case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
-    case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
-    print(f"DataFrame guardado em: {updated_file_path}")
-
-# FULL JOURNEY REPORT GEN
-def patients_full_journey(model, config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
     case_report = pd.read_csv(file_path)
@@ -299,14 +264,66 @@ def patients_full_journey(model, config):
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
-    # Recolhe todos os prompts primeiro
-    prompts = []
-    indices = []
+    print("\n number of row:", len(case_report))
 
-    for index, row in case_report.iterrows():
-        admission_report = row['syn_admission_report']
-        discharge_report = row['syn_discharge_report']
+    valid_rows = {
+        index: (row[config["CASE_REPORT_COLUMN_NAME"]], row["syn_admission_report"])
+        for index, row in case_report.iterrows()
+        if row[config["CASE_REPORT_COLUMN_NAME"]] and row["syn_admission_report"] != "Report generation failed"
+    }
 
+    invalid_indices = [
+        index for index, row in case_report.iterrows()
+        if not row[config["CASE_REPORT_COLUMN_NAME"]] or row["syn_admission_report"] == "Report generation failed"
+    ]
+
+    for index in invalid_indices:
+        case_report.loc[index, 'syn_discharge_report'] = "Report generation failed"
+
+    lock = threading.Lock()
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        futures = {
+            executor.submit(generate_report, index, clinical_narrative, admission_report, config): index
+            for index, (clinical_narrative, admission_report) in valid_rows.items()
+        }
+
+        for future in as_completed(futures):
+            try:
+                index, prompt = future.result()
+                with lock:
+                    results[index] = prompt
+            except Exception as e:
+                index = futures[future]
+                with lock:
+                    case_report.loc[index, 'syn_discharge_report'] = "Report generation failed"
+                print(f"[ERROR] Index {index}: {e}")
+
+    valid_indices = [index for index in valid_rows.keys() if index in results]
+    prompts = [results[index] for index in valid_indices]
+
+    print("Prompts created")
+    print(f"A gerar {len(prompts)} discharge reports...")
+
+    updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
+    updated_file_path_output = os.path.join(output_path, file_name + "_synthetic_discharge_report.csv")
+        
+    valid_indices = list(valid_rows.keys())
+
+    reports = generate_text_with_local_model_batch(model, prompts, config)
+
+    for i, (index, report) in enumerate(zip(valid_indices, reports)):
+        print(f"GEN: {i + 1}/{len(prompts)}")
+        report = clean_output(report)
+        case_report.loc[index, 'syn_discharge_report'] = report or "Report generation failed"
+
+    case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
+    case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
+
+# FULL JOURNEY REPORT GEN
+def patients_full_journey(model, config):
+    def generate_report(index, admission_report, discharge_report, config):
         prompt = f"""
         "{admission_report}" and "{discharge_report}"
 
@@ -327,22 +344,74 @@ def patients_full_journey(model, config):
         2. Several reports based on patients situations during stay in the hospital. The report should be in day wise.
         3. Discharge Report (do not include date in the heading and also must mention the whole day of staying in the hospital)
         """
-        prompts.append(prompt)
-        indices.append(index)
+        return index, prompt
 
-    # Gera todos os reports de uma vez (batch)
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
+    case_report = pd.read_csv(file_path)
+    file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
+
+    output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    print("\n number of row:", len(case_report))
+
+    valid_rows = {
+        index: (row["syn_admission_report"], row["syn_discharge_report"])
+        for index, row in case_report.iterrows()
+        if row["syn_admission_report"] != "Report generation failed"
+        and row["syn_discharge_report"] != "Report generation failed"
+    }
+
+    invalid_indices = [
+        index for index, row in case_report.iterrows()
+        if row["syn_admission_report"] == "Report generation failed"
+        or row["syn_discharge_report"] == "Report generation failed"
+    ]
+
+    for index in invalid_indices:
+        case_report.loc[index, 'syn_full_journey'] = "Full journey generation failed"
+
+    lock = threading.Lock()
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        futures = {
+            executor.submit(generate_report, index, admission_report, discharge_report, config): index
+            for index, (admission_report, discharge_report) in valid_rows.items()
+        }
+
+        for future in as_completed(futures):
+            try:
+                index, prompt = future.result()
+                with lock:
+                    results[index] = prompt
+            except Exception as e:
+                index = futures[future]
+                with lock:
+                    case_report.loc[index, 'syn_full_journey'] = "Full journey generation failed"
+                print(f"[ERROR] Index {index}: {e}")
+
+    valid_indices = [index for index in valid_rows.keys() if index in results]
+    prompts = [results[index] for index in valid_indices]
+
+    print("Prompts created")
     print(f"A gerar {len(prompts)} full journey reports...")
-    reports = generate_text_with_local_model_batch(model, prompts, config)
 
-    # Guarda os resultados
-    for index, report in zip(indices, reports):
-        print(f"GEN: {indices.index(index)+1}/{len(prompts)}\n{report}")
-        case_report.loc[index, 'syn_full_journey'] = report if report else "Full journey generation failed"
-
-    # Guarda o CSV apenas uma vez no final
     updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
     updated_file_path_output = os.path.join(output_path, file_name + "_synthetic_full_journey_report.csv")
+
+    valid_indices = list(valid_rows.keys())
+
+    reports = generate_text_with_local_model_batch(model, prompts, config)
+
+    for i, (index, report) in enumerate(zip(valid_indices, reports)):
+        print(f"GEN: {i + 1}/{len(prompts)}")
+        report = clean_output(report)
+        case_report.loc[index, 'syn_full_journey'] = report or "Report generation failed"
+
     case_report.to_csv(updated_file_path, index=False, encoding='utf-8-sig')
     case_report.to_csv(updated_file_path_output, index=False, encoding='utf-8-sig')
-    print(f"Finished: DataFrame guardado em: {updated_file_path_output}")
 
+    print(f"Finished: DataFrame guardado em: {updated_file_path_output}")

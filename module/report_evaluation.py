@@ -12,6 +12,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer  # For text vectoriz
 from sklearn.cluster import DBSCAN  # Density-based clustering
 from sklearn.cluster import KMeans  # K-means clustering
 from huggingface_hub import snapshot_download
+import re
+import json
+from collections import defaultdict
 
 # Custom function from another module to define the device (CPU/GPU)
 from module.journey_configuer import device
@@ -38,7 +41,6 @@ def load_ner(config):
     
     return ner
 
-
 def load_bert(config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     MODEL_ID = "google-bert/bert-base-multilingual-cased"
@@ -53,8 +55,7 @@ def load_bert(config):
             #idf=True,
             #idf_sents=corpus,
             batch_size=32,              # reduz se tiveres pouca RAM/VRAM
-            rescale_with_baseline=False, # True só funciona para modelos conhecidos do HF
-            
+            rescale_with_baseline=False, # True só funciona para modelos conhecidos do HF   
         )
         print("Modelo carregado localmente.")
     except Exception:
@@ -85,15 +86,177 @@ def extract_ner(ner_pipeline, text):
     """
     Extracts named entities from the provided text using the NER model pipeline.
     """
+    def clean_entity(e):
+        e = e.strip()
+        e = re.sub(r'\s+', ' ', e)
+        return e
     try:
-        return ner_pipeline(text)  # Extract entities using the NER pipeline
+        text = text.replace("\n", " ")
+        text = re.sub(r"\s+", " ", text)
+        ner = ner_pipeline(text)  # Extract entities using the NER pipeline
+        res = {
+            (e['entity_group'], clean_entity(text[e['start']:e['end']]))
+            for e in ner
+        }  # Use a set to store unique entities
+        return res
+        
     except Exception as e:
         print(f"Error processing text: {e}")
         return []  # If there's an error, return an empty list
 
+def _normalize_entity_text(value):
+    value = value.lower().strip()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[^\w\s-]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
-def ner_similarity(ner1, ner2):
+def _token_levenshtein_distance(tokens1, tokens2, max_distance=1):
+    if abs(len(tokens1) - len(tokens2)) > max_distance:
+        return max_distance + 1
+
+    previous = list(range(len(tokens2) + 1))
+    for i, t1 in enumerate(tokens1, start=1):
+        current = [i]
+        row_min = current[0]
+        for j, t2 in enumerate(tokens2, start=1):
+            cost = 0 if t1 == t2 else 1
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + cost,
+            ))
+            if current[-1] < row_min:
+                row_min = current[-1]
+
+        if row_min > max_distance:
+            return max_distance + 1
+
+        previous = current
+
+    return previous[-1]
+
+
+def _is_relaxed_entity_match(entity_a, entity_b, max_token_distance=1):
+    norm_a = _normalize_entity_text(entity_a)
+    norm_b = _normalize_entity_text(entity_b)
+
+    if not norm_a or not norm_b:
+        return False
+
+    if norm_a == norm_b:
+        return True
+
+    tokens_a = norm_a.split()
+    tokens_b = norm_b.split()
+    distance = _token_levenshtein_distance(tokens_a, tokens_b, max_distance=max_token_distance)
+    return distance <= max_token_distance
+
+
+def _entities_by_class(entities):
+    grouped = defaultdict(set)
+    for entity_class, entity_text in entities:
+        grouped[entity_class].add(_normalize_entity_text(entity_text))
+    return grouped
+
+
+def ner_similarity(ner1, ner2, text1, text2):
+    """
+    Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
+    If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
+
+    Parameters:
+    - ner1: List of named entities, where each entity is a dictionary with an 'entity' key.
+    - ner2: List of named entities, where each entity is a dictionary with an 'entity' key.
+
+    Returns:
+    - list of 2 values:
+        1st value:
+            - 1 if all entities in ner2 exist in ner1.
+            - A float value representing the percentage of ner2 entities found in ner1 if not all match.
+        2st value:
+            - 1 if all entities in ner1 exist in ner2.
+            - A float value representing the percentage of ner1 entities found in ner2 if not all match.
+    """
+    del text1, text2  # Kept in signature for backward compatibility in caller.
+
+    entities1 = set(ner1)
+    entities2 = set(ner2)
+
+    by_class_1 = _entities_by_class(entities1)
+    by_class_2 = _entities_by_class(entities2)
+    all_classes = sorted(set(by_class_1.keys()).union(set(by_class_2.keys())))
+
+    strict_lost_by_class = {}
+    strict_lost_rate_by_class = {}
+    relaxed_lost_by_class = {}
+    relaxed_lost_rate_by_class = {}
+
+    strict_matched_total = 0
+    relaxed_extra_total = 0
+    total_entities_1 = 0
+
+    for entity_class in all_classes:
+        class_entities_1 = set(by_class_1.get(entity_class, set()))
+        class_entities_2 = set(by_class_2.get(entity_class, set()))
+
+        total_ref = len(class_entities_1)
+        total_entities_1 += total_ref
+
+        strict_matched = class_entities_1.intersection(class_entities_2)
+        strict_matched_total += len(strict_matched)
+
+        strict_lost = total_ref - len(strict_matched)
+        strict_lost_by_class[entity_class] = strict_lost
+        strict_lost_rate_by_class[entity_class] = (strict_lost / total_ref) if total_ref else 0.0
+
+        unmatched_1 = list(class_entities_1 - strict_matched)
+        unmatched_2 = list(class_entities_2 - strict_matched)
+        used_2 = set()
+        relaxed_extra = 0
+
+        for candidate_1 in unmatched_1:
+            match_pos = -1
+            for pos, candidate_2 in enumerate(unmatched_2):
+                if pos in used_2:
+                    continue
+                if _is_relaxed_entity_match(candidate_1, candidate_2, max_token_distance=1):
+                    match_pos = pos
+                    break
+
+            if match_pos >= 0:
+                used_2.add(match_pos)
+                relaxed_extra += 1
+
+        relaxed_extra_total += relaxed_extra
+        relaxed_lost = strict_lost - relaxed_extra
+        relaxed_lost_by_class[entity_class] = relaxed_lost
+        relaxed_lost_rate_by_class[entity_class] = (relaxed_lost / total_ref) if total_ref else 0.0
+
+    total_entities_2 = len(entities2)
+    strict_ner1_in_ner2 = (strict_matched_total / total_entities_1) if total_entities_1 else 0.0
+    relaxed_ner1_in_ner2 = ((strict_matched_total + relaxed_extra_total) / total_entities_1) if total_entities_1 else 0.0
+
+    reverse_exact = len(entities1.intersection(entities2))
+    strict_ner2_in_ner1 = (reverse_exact / total_entities_2) if total_entities_2 else 0.0
+
+    return {
+        "strict": {
+            "ner1_in_ner2": strict_ner1_in_ner2,
+            "ner2_in_ner1": strict_ner2_in_ner1,
+            "lost_by_class": strict_lost_by_class,
+            "lost_rate_by_class": strict_lost_rate_by_class,
+        },
+        "relaxed": {
+            "ner1_in_ner2": relaxed_ner1_in_ner2,
+            "lost_by_class": relaxed_lost_by_class,
+            "lost_rate_by_class": relaxed_lost_rate_by_class,
+        }
+    }
+
+'''
+def ner_similarity(ner1, ner2, text1, text2):
     """
     Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
     If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
@@ -112,41 +275,78 @@ def ner_similarity(ner1, ner2):
             - A float value representing the percentage of ner1 entities found in ner2 if not all match.
     """
     # Extract the entity names from ner1 and ner2
-    entities1 = {entity.get('word', 'O') for entity in ner1}  # Use a set for faster lookups
-    entities2 = {entity.get('word', 'O') for entity in ner2}
-    
-    print(f"Entidades ner1: {ner1}\nEntidades ner2: {ner2}")
-
+    entities1 = ner1
+    entities2 = ner2
+    """
     print(f"\n\nEntidades ner1: {entities1}\nEntidades ner2: {entities2}")    
-
     # Calculate the percentage of ner1 entities found in ner2
     matching_entities_ner1 = entities2.intersection(entities1)
+    print("Entidades em ner1 e ner2", matching_entities_ner1)
     percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
 
     
     # Calculate the percentage of ner2 entities found in ner1
     matching_entities_ner2 = entities1.intersection(entities2)
     percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
-        
-    print(f"\nNer1 in ner2: {percentage_ner1} Ner2 in ner1: {percentage_ner2}")
+    """
+    
+    # Calculate percentage of entities from ner1 in text2
+    print("ner1: ", entities1)
+    print("ner2: ", entities2)
 
+    # Caldulate taxa de classes de entidades de ner1 presentes em ner2 e vice-versa
+    match_class_ner1 = {}
+    for e in entities1:
+        class_e = e[0]
+        if class_e in match_class_ner1:
+            match_class_ner1[class_e] += 1
+        else:
+            match_class_ner1[class_e] = 1
+            
+    print("Classes de entidades em ner1: ", match_class_ner1)
+    
+    match_class_ner2 = {}
+    for e in entities2:
+        class_e = e[0]
+        if class_e in match_class_ner2:
+            match_class_ner2[class_e] += 1
+        else:
+            match_class_ner2[class_e] = 1
+            
+    print("Classes de entidades em ner2: ", match_class_ner2)
+    
+    for class_e in match_class_ner1:
+        if class_e in match_class_ner2:
+            print(f"Classe {class_e} presente em ner1 e ner2: {match_class_ner1[class_e]} em ner1, {match_class_ner2[class_e]} em ner2")
+        else:
+            print(f"Classe {class_e} presente em ner1 mas não em ner2: {match_class_ner1[class_e]} em ner1, 0 em ner2")
+            
+    for class_e in match_class_ner2:
+        if class_e not in match_class_ner1:
+            print(f"Classe {class_e} presente em ner2 mas não em ner1: 0 em ner1, {match_class_ner2[class_e]} em ner2")
+    
+    matching_entities_ner1 = []
+    for e in entities1:
+        e = e[1]
+        print(f"Procurando entidade '{e}' de ner1 em text2...")
+        pathern = r'\b' + re.escape(e) + r'\b'
+        if re.search(pathern, text2.lower(), re.IGNORECASE):
+            matching_entities_ner1.append(e)
+        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
+
+    # calculate percentage of entities from ner2 in text1
+    matching_entities_ner2 = []
+    for e in entities2:
+        e = e[1]
+        pathern = r'\b' + re.escape(e) + r'\b'
+        if re.search(pathern, text1.lower(), re.IGNORECASE):
+            matching_entities_ner2.append(e)
+            
+    percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
+    print(f"\nNer1 in text2: {percentage_ner1} Ner2 in text1: {percentage_ner2}")
+    print(f"Ner1 in ner2: {len(entities2.intersection(entities1))/len(entities1)}")
+    print(f"Ner2 in ner1: {len(entities1.intersection(entities2))/len(entities2)}")
     return percentage_ner1, percentage_ner2
-
-'''
-# Function to calculate similarity between two sets of named entities
-def ner_similarity(ner1, ner2):
-    """
-    Calculates the similarity between two named entity sets using cosine similarity.
-    """
-    entities1 = [entity.get('entity', 'O') for entity in ner1]  # Extract the entity names from ner1
-    entities2 = [entity.get('entity', 'O') for entity in ner2]  # Extract the entity names from ner2
-    all_entities = set(entities1 + entities2)  # Combine the entities from both sets
-    vector1 = [entities1.count(entity) for entity in all_entities]  # Vector representation for ner1
-    vector2 = [entities2.count(entity) for entity in all_entities]  # Vector representation for ner2
-    if vector1 and vector2:  # Ensure both vectors are non-empty
-        return cosine_similarity([vector1], [vector2])[0][0]  # Calculate cosine similarity
-    else:
-        return 0  # Return similarity of 0 if vectors are empty
 '''
 
 # Function to calculate the average BERT score between references and candidates
@@ -210,9 +410,9 @@ def evaluator(config):
                 journey_ner = extract_ner(ner_pipeline, row['syn_full_journey'])
 
                 # Calculate NER-based similarity scores
-                ner_similarity_admission = ner_similarity(clinical_ner, admission_ner)
-                ner_similarity_discharge = ner_similarity(clinical_ner, discharge_ner)
-                ner_similarity_journey = ner_similarity(clinical_ner, journey_ner)
+                ner_similarity_admission = ner_similarity(clinical_ner, admission_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
+                ner_similarity_discharge = ner_similarity(clinical_ner, discharge_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
+                ner_similarity_journey = ner_similarity(clinical_ner, journey_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
 
                 print("Processing BERT score calculation")
                 # Calculate BERT scores for text similarity
@@ -228,13 +428,42 @@ def evaluator(config):
 
                 # Append the results for this row to the results list
                 results.append({
-                    'admission_ner1_similarity': ner_similarity_admission[0],
-                    'discharge_ner1_similarity': ner_similarity_discharge[0],
-                    'full_journey_ner1_similarity': ner_similarity_journey[0],
+                    'extracted_clinical_ner': json.dumps(list(clinical_ner), ensure_ascii=False),
+                    'extracted_admission_ner': json.dumps(list(admission_ner), ensure_ascii=False),
+                    'extracted_discharge_ner': json.dumps(list(discharge_ner), ensure_ascii=False),
+                    'extracted_journey_ner': json.dumps(list(journey_ner), ensure_ascii=False),
+                    
+                    
+                    'admission_ner1_similarity': ner_similarity_admission['strict']['ner1_in_ner2'],
+                    'admission_ner1_similarity_relaxed': ner_similarity_admission['relaxed']['ner1_in_ner2'],
+                    
+                    'discharge_ner1_similarity': ner_similarity_discharge['strict']['ner1_in_ner2'],
+                    'discharge_ner1_similarity_relaxed': ner_similarity_discharge['relaxed']['ner1_in_ner2'],
+                    
+                    'full_journey_ner1_similarity': ner_similarity_journey['strict']['ner1_in_ner2'],
+                    'full_journey_ner1_similarity_relaxed': ner_similarity_journey['relaxed']['ner1_in_ner2'],
 
-                    'admission_ner2_similarity': ner_similarity_admission[1],
-                    'discharge_ner2_similarity': ner_similarity_discharge[1],
-                    'full_journey_ner2_similarity': ner_similarity_journey[1],
+                    'admission_ner2_similarity': ner_similarity_admission['strict']['ner2_in_ner1'],
+                    'discharge_ner2_similarity': ner_similarity_discharge['strict']['ner2_in_ner1'],
+                    'full_journey_ner2_similarity': ner_similarity_journey['strict']['ner2_in_ner1'],
+
+                    'admission_strict_lost_by_class': json.dumps(ner_similarity_admission['strict']['lost_by_class'], ensure_ascii=False),
+                    'admission_relaxed_lost_by_class': json.dumps(ner_similarity_admission['relaxed']['lost_by_class'], ensure_ascii=False),
+                    
+                    'discharge_strict_lost_by_class': json.dumps(ner_similarity_discharge['strict']['lost_by_class'], ensure_ascii=False),
+                    'discharge_relaxed_lost_by_class': json.dumps(ner_similarity_discharge['relaxed']['lost_by_class'], ensure_ascii=False),
+                    
+                    'full_journey_strict_lost_by_class': json.dumps(ner_similarity_journey['strict']['lost_by_class'], ensure_ascii=False),
+                    'full_journey_relaxed_lost_by_class': json.dumps(ner_similarity_journey['relaxed']['lost_by_class'], ensure_ascii=False),
+ 
+                    'admission_strict_lost_rate_by_class': json.dumps(ner_similarity_admission['strict']['lost_rate_by_class'], ensure_ascii=False),
+                    'admission_relaxed_lost_rate_by_class': json.dumps(ner_similarity_admission['relaxed']['lost_rate_by_class'], ensure_ascii=False),
+                    
+                    'discharge_strict_lost_rate_by_class': json.dumps(ner_similarity_discharge['strict']['lost_rate_by_class'], ensure_ascii=False),
+                    'discharge_relaxed_lost_rate_by_class': json.dumps(ner_similarity_discharge['relaxed']['lost_rate_by_class'], ensure_ascii=False),
+                    
+                    'full_journey_strict_lost_rate_by_class': json.dumps(ner_similarity_journey['strict']['lost_rate_by_class'], ensure_ascii=False),
+                    'full_journey_relaxed_lost_rate_by_class': json.dumps(ner_similarity_journey['relaxed']['lost_rate_by_class'], ensure_ascii=False),
 
                     'bert_score_admission': bert_score_admission,
                     'bert_score_discharge': bert_score_discharge,
@@ -252,9 +481,29 @@ def evaluator(config):
                     'discharge_ner1_similarity': np.nan,
                     'full_journey_ner1_similarity': np.nan,
 
+                    'admission_ner1_similarity_relaxed': np.nan,
+                    'discharge_ner1_similarity_relaxed': np.nan,
+                    'full_journey_ner1_similarity_relaxed': np.nan,
+
                     'admission_ner2_similarity': np.nan,
                     'discharge_ner2_similarity': np.nan,
                     'full_journey_ner2_similarity': np.nan,
+
+                    'admission_strict_lost_by_class': None,
+                    'discharge_strict_lost_by_class': None,
+                    'full_journey_strict_lost_by_class': None,
+
+                    'admission_strict_lost_rate_by_class': None,
+                    'discharge_strict_lost_rate_by_class': None,
+                    'full_journey_strict_lost_rate_by_class': None,
+
+                    'admission_relaxed_lost_by_class': None,
+                    'discharge_relaxed_lost_by_class': None,
+                    'full_journey_relaxed_lost_by_class': None,
+
+                    'admission_relaxed_lost_rate_by_class': None,
+                    'discharge_relaxed_lost_rate_by_class': None,
+                    'full_journey_relaxed_lost_rate_by_class': None,
 
                     'bert_score_admission': None,
                     'bert_score_discharge': None,
@@ -271,9 +520,29 @@ def evaluator(config):
                     'discharge_ner1_similarity': np.nan,
                     'full_journey_ner1_similarity': np.nan,
 
+                    'admission_ner1_similarity_relaxed': np.nan,
+                    'discharge_ner1_similarity_relaxed': np.nan,
+                    'full_journey_ner1_similarity_relaxed': np.nan,
+
                     'admission_ner2_similarity': np.nan,
                     'discharge_ner2_similarity': np.nan,
                     'full_journey_ner2_similarity': np.nan,
+
+                    'admission_strict_lost_by_class': None,
+                    'discharge_strict_lost_by_class': None,
+                    'full_journey_strict_lost_by_class': None,
+
+                    'admission_strict_lost_rate_by_class': None,
+                    'discharge_strict_lost_rate_by_class': None,
+                    'full_journey_strict_lost_rate_by_class': None,
+
+                    'admission_relaxed_lost_by_class': None,
+                    'discharge_relaxed_lost_by_class': None,
+                    'full_journey_relaxed_lost_by_class': None,
+
+                    'admission_relaxed_lost_rate_by_class': None,
+                    'discharge_relaxed_lost_rate_by_class': None,
+                    'full_journey_relaxed_lost_rate_by_class': None,
 
                     'bert_score_admission': None,
                     'bert_score_discharge': None,

@@ -1,7 +1,12 @@
 import json
+import os
+
+cores = os.cpu_count()
+gpus = 2  
+os.environ["OMP_NUM_THREADS"] = str(cores // gpus)
+
 from module.report_generation import generator
 from module.report_evaluation import evaluator
-import os
 import time
 import argparse
 
@@ -34,8 +39,3 @@ print(f"\nEvaluation Finished...\n Time:{time.time()}\n")
 end_time = time.time() 
 duration = end_time - start_time
 print(f"Full process done... \nStart Time: {start_time} \nEnd Time: {end_time} \nDuration: {duration}")
-
-
-
-
-
