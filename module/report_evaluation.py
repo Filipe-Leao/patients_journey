@@ -1,20 +1,18 @@
 # Importing necessary libraries
 import pandas as pd  # For handling and manipulating structured data
-import google.generativeai as genai  # For using Google's Generative AI functionalities
 import os  # For operating system-related functionalities (e.g., file path handling)
 import torch  # For deep learning models and computations
 from transformers import pipeline  # For using pre-trained models from Hugging Face
-from sklearn.metrics.pairwise import cosine_similarity  # For computing similarity between vectors
 import numpy as np  # For numerical computations
 from bert_score import score, BERTScorer  # For evaluating text similarity using BERT embeddings
 from sacrebleu.metrics import BLEU  # For BLEU score calculation (text similarity evaluation)
 from sklearn.feature_extraction.text import TfidfVectorizer  # For text vectorization using TF-IDF
-from sklearn.cluster import DBSCAN  # Density-based clustering
 from sklearn.cluster import KMeans  # K-means clustering
 from huggingface_hub import snapshot_download
 import re
 import json
 from collections import defaultdict
+from py_heideltime import heideltime
 
 # Custom function from another module to define the device (CPU/GPU)
 from module.journey_configuer import device
@@ -192,10 +190,14 @@ def ner_similarity(ner1, ner2, text1, text2):
     strict_lost_rate_by_class = {}
     relaxed_lost_by_class = {}
     relaxed_lost_rate_by_class = {}
+    only_strict_lost_by_class = {}  # Entities lost in strict matching (before relaxed recovery)
+    only_relaxed_lost_by_class = {}  # Entities lost in both strict and relaxed matching
+    recovery_by_relaxed_by_class = {}  # Entities recovered by relaxed matching from strict
 
     strict_matched_total = 0
     relaxed_extra_total = 0
     total_entities_1 = 0
+    not_found_by_class = {}
 
     for entity_class in all_classes:
         class_entities_1 = set(by_class_1.get(entity_class, set()))
@@ -214,7 +216,9 @@ def ner_similarity(ner1, ner2, text1, text2):
         unmatched_1 = list(class_entities_1 - strict_matched)
         unmatched_2 = list(class_entities_2 - strict_matched)
         used_2 = set()
-        relaxed_extra = 0
+        recovered_by_relaxed = []
+        
+        not_found = []
 
         for candidate_1 in unmatched_1:
             match_pos = -1
@@ -227,12 +231,25 @@ def ner_similarity(ner1, ner2, text1, text2):
 
             if match_pos >= 0:
                 used_2.add(match_pos)
-                relaxed_extra += 1
+                recovered_by_relaxed.append(candidate_1)
+            else:
+                not_found.append(candidate_1)
 
-        relaxed_extra_total += relaxed_extra
-        relaxed_lost = strict_lost - relaxed_extra
+        relaxed_extra_total += len(recovered_by_relaxed)
+        relaxed_lost = strict_lost - len(recovered_by_relaxed)
         relaxed_lost_by_class[entity_class] = relaxed_lost
         relaxed_lost_rate_by_class[entity_class] = (relaxed_lost / total_ref) if total_ref else 0.0
+        
+        strict_lost_entities = sorted(unmatched_1)
+        recovered_by_relaxed = sorted(recovered_by_relaxed)
+        not_found = sorted(not_found)
+
+        # Track the type of losses as entity lists instead of counts.
+        # only_strict_lost: all entities lost in strict matching
+        # only_relaxed_lost: entities not found even in relaxed matching
+        recovery_by_relaxed_by_class[entity_class] = recovered_by_relaxed
+        only_relaxed_lost_by_class[entity_class] = not_found
+        only_strict_lost_by_class[entity_class] = strict_lost_entities
 
     total_entities_2 = len(entities2)
     strict_ner1_in_ner2 = (strict_matched_total / total_entities_1) if total_entities_1 else 0.0
@@ -252,102 +269,14 @@ def ner_similarity(ner1, ner2, text1, text2):
             "ner1_in_ner2": relaxed_ner1_in_ner2,
             "lost_by_class": relaxed_lost_by_class,
             "lost_rate_by_class": relaxed_lost_rate_by_class,
+        },
+        "not_found": not_found_by_class,
+        "lost_types": {
+            "Lost_in_strict": only_strict_lost_by_class,  # Lost in strict matching (before relaxed)
+            "Lost_in_both": only_relaxed_lost_by_class,  # Lost in both strict and relaxed
+            "Recovered_by_relaxed": recovery_by_relaxed_by_class,  # Entities recovered by relaxed
         }
     }
-
-'''
-def ner_similarity(ner1, ner2, text1, text2):
-    """
-    Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
-    If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
-
-    Parameters:
-    - ner1: List of named entities, where each entity is a dictionary with an 'entity' key.
-    - ner2: List of named entities, where each entity is a dictionary with an 'entity' key.
-
-    Returns:
-    - list of 2 values:
-        1st value:
-            - 1 if all entities in ner2 exist in ner1.
-            - A float value representing the percentage of ner2 entities found in ner1 if not all match.
-        2st value:
-            - 1 if all entities in ner1 exist in ner2.
-            - A float value representing the percentage of ner1 entities found in ner2 if not all match.
-    """
-    # Extract the entity names from ner1 and ner2
-    entities1 = ner1
-    entities2 = ner2
-    """
-    print(f"\n\nEntidades ner1: {entities1}\nEntidades ner2: {entities2}")    
-    # Calculate the percentage of ner1 entities found in ner2
-    matching_entities_ner1 = entities2.intersection(entities1)
-    print("Entidades em ner1 e ner2", matching_entities_ner1)
-    percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
-
-    
-    # Calculate the percentage of ner2 entities found in ner1
-    matching_entities_ner2 = entities1.intersection(entities2)
-    percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
-    """
-    
-    # Calculate percentage of entities from ner1 in text2
-    print("ner1: ", entities1)
-    print("ner2: ", entities2)
-
-    # Caldulate taxa de classes de entidades de ner1 presentes em ner2 e vice-versa
-    match_class_ner1 = {}
-    for e in entities1:
-        class_e = e[0]
-        if class_e in match_class_ner1:
-            match_class_ner1[class_e] += 1
-        else:
-            match_class_ner1[class_e] = 1
-            
-    print("Classes de entidades em ner1: ", match_class_ner1)
-    
-    match_class_ner2 = {}
-    for e in entities2:
-        class_e = e[0]
-        if class_e in match_class_ner2:
-            match_class_ner2[class_e] += 1
-        else:
-            match_class_ner2[class_e] = 1
-            
-    print("Classes de entidades em ner2: ", match_class_ner2)
-    
-    for class_e in match_class_ner1:
-        if class_e in match_class_ner2:
-            print(f"Classe {class_e} presente em ner1 e ner2: {match_class_ner1[class_e]} em ner1, {match_class_ner2[class_e]} em ner2")
-        else:
-            print(f"Classe {class_e} presente em ner1 mas não em ner2: {match_class_ner1[class_e]} em ner1, 0 em ner2")
-            
-    for class_e in match_class_ner2:
-        if class_e not in match_class_ner1:
-            print(f"Classe {class_e} presente em ner2 mas não em ner1: 0 em ner1, {match_class_ner2[class_e]} em ner2")
-    
-    matching_entities_ner1 = []
-    for e in entities1:
-        e = e[1]
-        print(f"Procurando entidade '{e}' de ner1 em text2...")
-        pathern = r'\b' + re.escape(e) + r'\b'
-        if re.search(pathern, text2.lower(), re.IGNORECASE):
-            matching_entities_ner1.append(e)
-        percentage_ner1 = len(matching_entities_ner1) / len(entities1) if entities1 else 0
-
-    # calculate percentage of entities from ner2 in text1
-    matching_entities_ner2 = []
-    for e in entities2:
-        e = e[1]
-        pathern = r'\b' + re.escape(e) + r'\b'
-        if re.search(pathern, text1.lower(), re.IGNORECASE):
-            matching_entities_ner2.append(e)
-            
-    percentage_ner2 = len(matching_entities_ner2) / len(entities2) if entities2 else 0
-    print(f"\nNer1 in text2: {percentage_ner1} Ner2 in text1: {percentage_ner2}")
-    print(f"Ner1 in ner2: {len(entities2.intersection(entities1))/len(entities1)}")
-    print(f"Ner2 in ner1: {len(entities1.intersection(entities2))/len(entities2)}")
-    return percentage_ner1, percentage_ner2
-'''
 
 # Function to calculate the average BERT score between references and candidates
 def calculate_bert_score(bert, references, candidates):
@@ -365,6 +294,46 @@ def calculate_bleu_score(bleu, references, candidates):
     score = bleu.sentence_score(candidates, [references])  # Calculate BLEU score
     return score.score / 100.0  # Normalize BLEU score between 0 and 1
 
+def get_temporal_expressions(text):
+    """
+    Extracts temporal expressions from the given text using Heideltime and returns a list of normalized temporal expressions.
+    """
+    try: 
+        expressions = heideltime(
+            text,
+            language='Portuguese',
+            document_type='Narrative',
+        )
+        seen = set()
+        res = []
+        for exp in expressions:
+            key = (exp['text'], exp['type'], exp['value'])
+            if key not in seen:
+                seen.add(key)
+                res.append({
+                    'text': exp['text'],
+                    'type': exp['type'],
+                    'value': exp['value'],
+                })
+    except Exception as e:
+        print(f"Error occurred while extracting temporal expressions: {e}")
+        res = []
+    return res
+
+def lost_temporal_expressions(temporal_expressions1, temporal_expressions2):
+    """
+    Compares two sets of temporal expressions and identifies which expressions from the first set are not present in the second set.
+    """
+    lost_expressions = []
+    for exp1 in temporal_expressions1:
+        found = False
+        for exp2 in temporal_expressions2:
+            if _is_relaxed_entity_match(exp1['text'], exp2['text'], max_token_distance=1):
+                found = True
+                break
+        if not found:
+            lost_expressions.append(exp1)
+    return lost_expressions
 
 # Main evaluation function that performs various evaluations on clinical narratives
 def evaluator(config):
@@ -401,7 +370,7 @@ def evaluator(config):
         # Iterate over the rows of the data to perform evaluations
         for index, row in gen_data.iterrows():  # Limit processing to 5 rows for demonstration
             try:
-                print(f"Processing Patient {index}/{len(gen_data)}")
+                print(f"\nProcessing Patient {index}/{len(gen_data)}")
                 print("Processing NER calculation")
                 # Extract named entities from various text columns
                 admission_ner = extract_ner(ner_pipeline, row['syn_admission_report'])
@@ -425,6 +394,16 @@ def evaluator(config):
                 bleu_score_admission = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
                 bleu_score_discharge = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
                 bleu_score_journey = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
+                
+                # Get temporal expressions from the clinical report
+                temporal_expressions_clinical = get_temporal_expressions(row[config["CASE_REPORT_COLUMN_NAME"]])
+                temporal_expressions_admission = get_temporal_expressions(row['syn_admission_report'])
+                temporal_expressions_discharge = get_temporal_expressions(row['syn_discharge_report'])
+                temporal_expressions_journey = get_temporal_expressions(row['syn_full_journey'])
+                
+                lost_temporal_expressions_admission = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_admission)
+                lost_temporal_expressions_discharge = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_discharge)
+                lost_temporal_expressions_journey = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_journey)
 
                 # Append the results for this row to the results list
                 results.append({
@@ -432,7 +411,6 @@ def evaluator(config):
                     'extracted_admission_ner': json.dumps(list(admission_ner), ensure_ascii=False),
                     'extracted_discharge_ner': json.dumps(list(discharge_ner), ensure_ascii=False),
                     'extracted_journey_ner': json.dumps(list(journey_ner), ensure_ascii=False),
-                    
                     
                     'admission_ner1_similarity': ner_similarity_admission['strict']['ner1_in_ner2'],
                     'admission_ner1_similarity_relaxed': ner_similarity_admission['relaxed']['ner1_in_ner2'],
@@ -447,23 +425,41 @@ def evaluator(config):
                     'discharge_ner2_similarity': ner_similarity_discharge['strict']['ner2_in_ner1'],
                     'full_journey_ner2_similarity': ner_similarity_journey['strict']['ner2_in_ner1'],
 
-                    'admission_strict_lost_by_class': json.dumps(ner_similarity_admission['strict']['lost_by_class'], ensure_ascii=False),
-                    'admission_relaxed_lost_by_class': json.dumps(ner_similarity_admission['relaxed']['lost_by_class'], ensure_ascii=False),
+                    'admission_strict_lost_by_class': ner_similarity_admission['strict']['lost_by_class'],
+                    'admission_relaxed_lost_by_class': ner_similarity_admission['relaxed']['lost_by_class'],
+                    'admission_Lost_in_strict': ner_similarity_admission['lost_types']['Lost_in_strict'],
+                    'admission_recovery_by_relaxed': ner_similarity_admission['lost_types']['Recovered_by_relaxed'],
+                    'admission_Lost_in_both': ner_similarity_admission['lost_types']['Lost_in_both'],
                     
-                    'discharge_strict_lost_by_class': json.dumps(ner_similarity_discharge['strict']['lost_by_class'], ensure_ascii=False),
-                    'discharge_relaxed_lost_by_class': json.dumps(ner_similarity_discharge['relaxed']['lost_by_class'], ensure_ascii=False),
+                    'discharge_strict_lost_by_class': ner_similarity_discharge['strict']['lost_by_class'],
+                    'discharge_relaxed_lost_by_class': ner_similarity_discharge['relaxed']['lost_by_class'],
+                    'discharge_Lost_in_strict': ner_similarity_discharge['lost_types']['Lost_in_strict'],
+                    'discharge_recovery_by_relaxed': ner_similarity_discharge['lost_types']['Recovered_by_relaxed'],
+                    'discharge_Lost_in_both': ner_similarity_discharge['lost_types']['Lost_in_both'],
                     
-                    'full_journey_strict_lost_by_class': json.dumps(ner_similarity_journey['strict']['lost_by_class'], ensure_ascii=False),
-                    'full_journey_relaxed_lost_by_class': json.dumps(ner_similarity_journey['relaxed']['lost_by_class'], ensure_ascii=False),
- 
-                    'admission_strict_lost_rate_by_class': json.dumps(ner_similarity_admission['strict']['lost_rate_by_class'], ensure_ascii=False),
-                    'admission_relaxed_lost_rate_by_class': json.dumps(ner_similarity_admission['relaxed']['lost_rate_by_class'], ensure_ascii=False),
+                    'full_journey_strict_lost_by_class': ner_similarity_journey['strict']['lost_by_class'],
+                    'full_journey_relaxed_lost_by_class': ner_similarity_journey['relaxed']['lost_by_class'],
+                    'full_journey_Lost_in_strict': ner_similarity_journey['lost_types']['Lost_in_strict'],
+                    'full_journey_recovery_by_relaxed': ner_similarity_journey['lost_types']['Recovered_by_relaxed'],
+                    'full_journey_Lost_in_both': ner_similarity_journey['lost_types']['Lost_in_both'],
+
+                    'admission_strict_lost_rate_by_class': ner_similarity_admission['strict']['lost_rate_by_class'], 
+                    'admission_relaxed_lost_rate_by_class': ner_similarity_admission['relaxed']['lost_rate_by_class'],
                     
-                    'discharge_strict_lost_rate_by_class': json.dumps(ner_similarity_discharge['strict']['lost_rate_by_class'], ensure_ascii=False),
-                    'discharge_relaxed_lost_rate_by_class': json.dumps(ner_similarity_discharge['relaxed']['lost_rate_by_class'], ensure_ascii=False),
+                    'discharge_strict_lost_rate_by_class': ner_similarity_discharge['strict']['lost_rate_by_class'], 
+                    'discharge_relaxed_lost_rate_by_class': ner_similarity_discharge['relaxed']['lost_rate_by_class'],
                     
-                    'full_journey_strict_lost_rate_by_class': json.dumps(ner_similarity_journey['strict']['lost_rate_by_class'], ensure_ascii=False),
-                    'full_journey_relaxed_lost_rate_by_class': json.dumps(ner_similarity_journey['relaxed']['lost_rate_by_class'], ensure_ascii=False),
+                    'full_journey_strict_lost_rate_by_class': ner_similarity_journey['strict']['lost_rate_by_class'],
+                    'full_journey_relaxed_lost_rate_by_class': ner_similarity_journey['relaxed']['lost_rate_by_class'],
+                    
+                    'clinical_temporal_expressions': list(temporal_expressions_clinical),
+                    'admission_temporal_expressions': list(temporal_expressions_admission),
+                    'discharge_temporal_expressions': list(temporal_expressions_discharge),
+                    'full_journey_temporal_expressions': list(temporal_expressions_journey),
+                    
+                    'lost_temporal_expressions_admission': list(lost_temporal_expressions_admission),
+                    'lost_temporal_expressions_discharge': list(lost_temporal_expressions_discharge),
+                    'lost_temporal_expressions_journey': list(lost_temporal_expressions_journey),
 
                     'bert_score_admission': bert_score_admission,
                     'bert_score_discharge': bert_score_discharge,
@@ -505,6 +501,23 @@ def evaluator(config):
                     'discharge_relaxed_lost_rate_by_class': None,
                     'full_journey_relaxed_lost_rate_by_class': None,
 
+                    'admission_only_strict_lost': None,
+                    'admission_only_relaxed_lost': None,
+                    'admission_recovery_by_relaxed': None,
+                    
+                    'discharge_only_strict_lost': None,
+                    'discharge_only_relaxed_lost': None,
+                    'discharge_recovery_by_relaxed': None,
+                    
+                    'full_journey_only_strict_lost': None,
+                    'full_journey_only_relaxed_lost': None,
+                    'full_journey_recovery_by_relaxed': None,
+                    
+                    'clinical_temporal_expressions': None,
+                    'admission_temporal_expressions': None,
+                    'discharge_temporal_expressions': None,
+                    'full_journey_temporal_expressions': None,
+
                     'bert_score_admission': None,
                     'bert_score_discharge': None,
                     'bert_score_full_journey': None,
@@ -544,6 +557,23 @@ def evaluator(config):
                     'discharge_relaxed_lost_rate_by_class': None,
                     'full_journey_relaxed_lost_rate_by_class': None,
 
+                    'admission_only_strict_lost': None,
+                    'admission_only_relaxed_lost': None,
+                    'admission_recovery_by_relaxed': None,
+                    
+                    'discharge_only_strict_lost': None,
+                    'discharge_only_relaxed_lost': None,
+                    'discharge_recovery_by_relaxed': None,
+                    
+                    'full_journey_only_strict_lost': None,
+                    'full_journey_only_relaxed_lost': None,
+                    'full_journey_recovery_by_relaxed': None,
+                    
+                    'clinical_temporal_expressions': None,
+                    'admission_temporal_expressions': None,
+                    'discharge_temporal_expressions': None,
+                    'full_journey_temporal_expressions': None,
+
                     'bert_score_admission': None,
                     'bert_score_discharge': None,
                     'bert_score_full_journey': None,
@@ -558,14 +588,14 @@ def evaluator(config):
         # Save the evaluated data to a CSV file
         
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        output_path = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])
         
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
         gen_data.to_csv(output_path + "/" + file_name +  "_ner_bert_bleu_score_evaluation.csv", index=False)
-
-        print("\nScoring Processing done..\n")
+        print(f"Evaluation results saved to {output_path}/{file_name}_ner_bert_bleu_score_evaluation.csv")
+        print("Scoring Processing done..\n")
 
     # Perform clustering if enabled in the configuration
     if config["CLUSTERING"].lower() == "yes":
@@ -602,14 +632,14 @@ def evaluator(config):
         # Save the results with clustering to a CSV file
         
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+        output_path = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])
         
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
         gen_data.to_csv(output_path + "/" + file_name + "_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
-
-        print("\nClustering Processing done..\n")
+        print(f"Clustering results saved to {output_path}/{file_name}_cluster_ner_bert_bleu_score_evaluation.csv")
+        print("Clustering Processing done..\n")
 
 
     if config["PT_CLASSIFYING"].lower() == "yes":
@@ -690,11 +720,10 @@ def evaluator(config):
 
         # Save the results with PT classification to a new CSV file
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
-        
+        output_path = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])        
         if not os.path.exists(output_path):
             os.makedirs(output_path)
             
         gen_data.to_csv(output_path + "/" + file_name + "_PT_cluster_ner_bert_bleu_score_evaluation.csv", index=False)
-
+        print(f"PT classification results saved to {output_path}/{file_name}_PT_cluster_ner_bert_bleu_score_evaluation.csv")
         print("\nPT Classifying Processing done..\n")

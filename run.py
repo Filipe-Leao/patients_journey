@@ -1,19 +1,28 @@
 import json
 import os
+import time
+import argparse
 
-cores = os.cpu_count()
-gpus = 2  
+start_time: float = time.time()
+# Specify the path to your JSON config file
+BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+json_file_path: str = os.path.join(BASE_DIR,"config.json")
+
+# Open the file and load the JSON data
+with open(json_file_path, 'r') as json_file:
+    config = json.load(json_file)
+    
+cores: int = os.cpu_count()
+gpus: int = int(config["GPU_NUMBER"]) if config["GPU"].lower() == "yes" else 1
 os.environ["OMP_NUM_THREADS"] = str(cores // gpus)
 
 from module.report_generation import generator
 from module.report_evaluation import evaluator
-import time
-import argparse
 
-start_time = time.time()
+start_time: float = time.time()
 # Specify the path to your JSON config file
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-json_file_path = os.path.join(BASE_DIR,"config.json")
+BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+json_file_path: str = os.path.join(BASE_DIR,"config.json")
 
 # Open the file and load the JSON data
 with open(json_file_path, 'r') as json_file:

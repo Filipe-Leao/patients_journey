@@ -1,19 +1,13 @@
 
 #Import Library
 import pandas as pd
-import google.generativeai as genai
 import os
 import torch
 import re
 #from transformers import pipeline, GenerationConfig
 from huggingface_hub import snapshot_download
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 from bert_score import score
 from sacrebleu.metrics import BLEU
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import DBSCAN
-from sklearn.cluster import KMeans
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from vllm import LLM, SamplingParams
@@ -36,54 +30,32 @@ def case_report_load(config):
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"])
     return pd.read_csv(file_path)
 
-#text generation by gemini api
-def generate_text_with_gemini(prompt, config):
-    genai.configure(api_key=config["API_KEY"])
-    #print("Available models: ", [model.name for model in genai.list_models()])
-    model = genai.GenerativeModel("models/gemini-3.1-flash-lite-preview")  # Or use gemini-1.5-flash if required
-    response = model.generate_content(prompt)
-    return response.text
-
 def load_pipeline(config):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    MODEL_ID = "Qwen/Qwen3-14B"
-    LOCAL_DIR = os.path.join(BASE_DIR, "../../models/Qwen/Qwen3-14B")
-    num_gpus = 2
+    MODEL_ID = config["MODEL_ID"]
+    LOCAL_DIR = os.path.join(BASE_DIR, "../../models/" + MODEL_ID)
+    num_gpus = config["GPU_NUMBER"] if config["GPU"] == "YES" else 0
+    print(f"Loading model {MODEL_ID} from {LOCAL_DIR} with {num_gpus} GPUs...")
     
-    try:                    
-        return LLM(
-            model=LOCAL_DIR,
-            tensor_parallel_size=num_gpus,
-            dtype="auto",
-            max_model_len=32000,           # cover 24 146 + some headroom for output
-            gpu_memory_utilization=0.92,
-            enable_prefix_caching=True,
-            enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
-            max_num_batched_tokens=4096,   # chunk size, keeps memory flat
-            max_num_seqs=32,               # ← reduce from 512, long ctx × 512 = OOM
-        )
-    except:
+    if not os.path.exists(LOCAL_DIR):
         print("Modelo não encontrado localmente. A fazer download...")
-        
         snapshot_download(
             repo_id=MODEL_ID,
             local_dir=LOCAL_DIR,
             local_dir_use_symlinks=False
         )
-        
-        return LLM(
-            model=LOCAL_DIR,
-            tensor_parallel_size=num_gpus,
-            dtype="auto",
-            max_model_len=32000,           # cover 24 146 + some headroom for output
-            gpu_memory_utilization=0.92,
-            enable_prefix_caching=True,
-            enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
-            max_num_batched_tokens=4096,   # chunk size, keeps memory flat
-            max_num_seqs=32,               # ← reduce from 512, long ctx × 512 = OOM
-        )
-        
-
+    
+    return LLM(
+        model=LOCAL_DIR,
+        tensor_parallel_size=num_gpus,
+#        dtype="auto",
+#        max_model_len=32000,           # cover 24 146 + some headroom for output
+#        gpu_memory_utilization=0.90,
+#        enable_prefix_caching=True,
+#        enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
+#        max_num_batched_tokens=2048,   # reduce chunk size for better batching
+#        max_num_seqs=16,               # further reduce for diversity
+    )
 
 def generate_text_with_local_model_batch(
     model: LLM,
@@ -93,22 +65,40 @@ def generate_text_with_local_model_batch(
 
     sampling_params = SamplingParams(
         max_tokens=4096,
-        temperature=0.3,
-        top_p=0.95,
-        top_k=0,
-        min_p=0.0,
+        temperature=0.7,
+        top_p=0.9,
+        top_k=50,
+        min_p=0.01,
+        repetition_penalty=1.1,
     )
 
-    # Constrói os prompts com o chat template — igual ao teu código
+    # Constrói os prompts com o chat template
+    # if QWEN:
+    #   tokenizer.apply_chat_template(
+    #        [
+    #            {"role": "system", "content": "/no_think"},
+    #            {"role": "user",   "content": prompt},
+    #        ],
+    #        tokenize=False,
+    #        add_generation_prompt=True,
+    #    )
+    # if BioMistral:
+    #   tokenizer.apply_chat_template(
+    #        [
+    #            {"role": "user",   "content": prompt},
+    #        ],
+    #        tokenize=False,
+    #        add_generation_prompt=True,
+    #    )
     tokenizer = model.get_tokenizer()
     formatted = [
         tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": "/no_think"},
+                #{"role": "system", "content": "/no_think"},
                 {"role": "user",   "content": prompt},
             ],
             tokenize=False,
-            add_generation_prompt=True,  # ← estava False (bug): o modelo não gerava corretamente
+            add_generation_prompt=True,
         )
         for prompt in prompts
     ]
@@ -128,16 +118,20 @@ def admission_report_generation(model, config):
         """Gera um único relatório via API."""
         prompt = f"""
             "{clinical_narrative}"
+            
             Based on the information above, write a realistic medical admission report in {config["GEN_LANGUAGE"]}
             for a patient upon arrival at the hospital. Use the information provided in {config["GEN_LANGUAGE"]} 
             and follow the writing style and terminology consistent with provided {config["GEN_LANGUAGE"]} case report. 
             While writing, adopt the perspective of a doctor and remember this is not discharge report. 
+            
             Follow these guidelines:
-            1. Write the report as a single, unstructured paragraph in clinical language.
-            2. Include only symptoms, signs, and relevant history of previous diseases, 
-            using appropriate medical abbreviations (e.g., HTA, DM).
-            3. Do not include treatment details, exam results, specific diagnoses, or follow-up treatments.
-            4. Conclude the report with an indication of the initial treatment provided, 
+                1. Write the report as a single, unstructured paragraph in clinical language.
+                2. Include only symptoms, signs, and relevant history of previous diseases,
+                   using appropriate medical abbreviations (e.g., HTA, DM),
+                3. Do not include treatment details, exam results, specific diagnoses, or follow-up treatments,
+                4. Conclude the report with an indication of the initial treatment provided, 
+                5. Include time-related information, such as the duration of the hospital stay, and the dates of key events (e.g., admission, medicine administration).
+
             specifying the administered dose, but avoid explicitly labelling this section as 'initial treatment.'
             Ensure the report is in {config["GEN_LANGUAGE"]}
             and feels authentic, mimicking how a doctor might write the admission scenario. 
@@ -158,7 +152,8 @@ def admission_report_generation(model, config):
     
     
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+    output_path = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])
+    
     updated_file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
     file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
 
@@ -236,7 +231,8 @@ def admission_report_generation(model, config):
 def discharge_report_generation(model, config):
     def generate_report(index, clinical_narrative, admission_report, config):
         prompt = f"""
-            "{clinical_narrative}" and "{admission_report}"
+            Clinical Narrative: "{clinical_narrative}" 
+            Admission Report: "{admission_report}"
 
             Based on the information above, write a realistic medical discharge report in {config["GEN_LANGUAGE"]} 
             for a patient upon leaving the hospital. Use the information provided in {config["GEN_LANGUAGE"]} and follow 
@@ -244,9 +240,11 @@ def discharge_report_generation(model, config):
             While writing, adopt the perspective of a doctor and remember this is not an admission report. 
 
             Follow these guidelines:
-            1. Write the report as a single, unstructured paragraph in clinical language.
-            2. Include a summary of the patient's stay in the hospital.
-            3. Include treatment summary, details of exams and their results, discharge medications, and follow-up instructions.
+                1. Write the report as a single, unstructured paragraph in clinical language.
+                2. Include a summary of the patient's stay in the hospital.
+                3. Include treatment summary, details of exams and their results, discharge medications, and follow-up instructions.
+                4. Include time-related information, such as the duration of the hospital stay, and the dates of key events (e.g., surgery, discharge, medicine administration).
+                5. Do not repeat information already mentioned in the admission report.
 
             Ensure the report is in {config["GEN_LANGUAGE"]}.
             And feels authentic, mimicking how a doctor might write the discharge scenario. 
@@ -255,12 +253,12 @@ def discharge_report_generation(model, config):
             
         return index, prompt
 
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
+    BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+    file_path: str = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
     case_report = pd.read_csv(file_path)
     file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
 
-    output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+    output_path: str = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
@@ -350,8 +348,7 @@ def patients_full_journey(model, config):
     file_path = os.path.join(BASE_DIR, config["CASE_REPORT_CSV_PATH"][:-4] + "_new.csv")
     case_report = pd.read_csv(file_path)
     file_name = os.path.splitext(os.path.basename(config["CASE_REPORT_CSV_PATH"]))[0]
-
-    output_path = os.path.join(BASE_DIR, config["OUTPUT_PATH"])
+    output_path = os.path.join(BASE_DIR, "../output/" + config["MODEL_ID"])
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
