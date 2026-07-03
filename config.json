@@ -1,16 +1,16 @@
 {
   
   "GEN_LANGUAGE":"European Portugues *(NOT BRAZILIAN PORTUGUESE)*",
-  "CASE_REPORT_CSV_PATH":"../data/pt_clinical_case_285.csv",
-  "CASE_REPORT_COLUMN_NAME":"Clinical_Narrative",
+  "CASE_REPORT_CSV_PATH":"../data/PMCPatients_part1.csv",
+  "CASE_REPORT_COLUMN_NAME":"patient_translated",
   "NER_MODEL":"portugueseNLP/medialbertina_pt-pt_900m_NER",
   "GENERATED_REPORT_TYPE":"all",
   "SCORING":"yes",
   "PT_CLASSIFYING":"NO",
   "CLUSTERING":"yes",
   "N_CLUSTER":"10",
-  "N_TESTING_ROW":"all",
-  "MODEL_ID":"../output/Qwen/Qwen3-14B",
+  "N_TESTING_ROW":"all", 
+  "MODEL_ID":"Qwen/Qwen3-14B",
   "GPU":"YES",
   "GPU_NUMBER":1,
   "API_KEY":""

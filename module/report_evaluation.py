@@ -13,6 +13,12 @@ import re
 import json
 from collections import defaultdict
 from py_heideltime import heideltime
+import concurrent.futures
+from threading import Lock
+
+
+_TEMPORAL_CACHE = {}
+_TEMPORAL_CACHE_LOCK = Lock()
 
 # Custom function from another module to define the device (CPU/GPU)
 from module.journey_configuer import device
@@ -80,7 +86,7 @@ def load_bert(config):
 
 
 # Function to extract named entities from text using the NER pipeline
-def extract_ner(ner_pipeline, text):
+def extract_ner(ner_pipeline, texts):
     """
     Extracts named entities from the provided text using the NER model pipeline.
     """
@@ -89,18 +95,50 @@ def extract_ner(ner_pipeline, text):
         e = re.sub(r'\s+', ' ', e)
         return e
     try:
-        text = text.replace("\n", " ")
-        text = re.sub(r"\s+", " ", text)
-        ner = ner_pipeline(text)  # Extract entities using the NER pipeline
+        texts = [text.replace("\n", " ") for text in texts]
+        texts = [re.sub(r"\s+", " ", text) for text in texts]
+        ners = ner_pipeline(texts)  # Extract entities using the NER pipeline
         res = {
-            (e['entity_group'], clean_entity(text[e['start']:e['end']]))
-            for e in ner
+            (e['entity_group'], clean_entity(texts[i][e['start']:e['end']]))
+            for ners in ners for i, e in enumerate([ners])  # Create a set of tuples (entity_group, entity_text)
         }  # Use a set to store unique entities
         return res
         
     except Exception as e:
         print(f"Error processing text: {e}")
         return []  # If there's an error, return an empty list
+    
+
+def extract_ner_batch(ner_pipeline, texts, batch_size=4):
+    def clean_text(text):
+        text = text.replace("\n", " ")
+        return re.sub(r"\s+", " ", text)
+
+    def clean_entity(value):
+        return re.sub(r"\s+", " ", value.strip())
+
+    cleaned_texts = [
+        clean_text(text) if isinstance(text, str) else ""
+        for text in texts
+    ]
+
+    batch_outputs = ner_pipeline(
+        cleaned_texts,
+        batch_size=batch_size,
+        #truncation=True,
+    )
+
+    results = []
+    for text, ner_list in zip(cleaned_texts, batch_outputs):
+        entities = {
+            (entity["entity_group"], clean_entity(text[entity["start"]:entity["end"]]))
+            for entity in ner_list
+        }
+        results.append(entities)
+
+    print(f"Extracted NER for {len(results)} texts.")
+    print(f"Sample NER output: {results[0] if results else 'No results'}")
+    return results
 
 def _normalize_entity_text(value):
     value = value.lower().strip()
@@ -159,7 +197,7 @@ def _entities_by_class(entities):
     return grouped
 
 
-def ner_similarity(ner1, ner2, text1, text2):
+def ner_similarity(ner1, ner2):
     """
     Checks if all named entities in ner1 exist in ner2 and ner2 exist in ner1.
     If true, returns 1,1. Otherwise, calculates the percentage of ner1 entities present in ner2 and the percentage of ner2 entities present in ner1.
@@ -177,8 +215,6 @@ def ner_similarity(ner1, ner2, text1, text2):
             - 1 if all entities in ner1 exist in ner2.
             - A float value representing the percentage of ner1 entities found in ner2 if not all match.
     """
-    del text1, text2  # Kept in signature for backward compatibility in caller.
-
     entities1 = set(ner1)
     entities2 = set(ner2)
 
@@ -298,9 +334,24 @@ def get_temporal_expressions(text):
     """
     Extracts temporal expressions from the given text using Heideltime and returns a list of normalized temporal expressions.
     """
+    if not isinstance(text, str):
+        return []
+    
+    config_path = (os.path.dirname(os.path.abspath(__file__)))
+
+    normalized_text = re.sub(r"\s+", " ", text).strip()
+    if not normalized_text:
+        return []
+
+    with _TEMPORAL_CACHE_LOCK:
+        cached = _TEMPORAL_CACHE.get(normalized_text)
+
+    if cached is not None:
+        return list(cached)
+
     try: 
         expressions = heideltime(
-            text,
+            normalized_text,
             language='Portuguese',
             document_type='Narrative',
         )
@@ -315,6 +366,9 @@ def get_temporal_expressions(text):
                     'type': exp['type'],
                     'value': exp['value'],
                 })
+
+        with _TEMPORAL_CACHE_LOCK:
+            _TEMPORAL_CACHE[normalized_text] = tuple(res)
     except Exception as e:
         print(f"Error occurred while extracting temporal expressions: {e}")
         res = []
@@ -364,115 +418,155 @@ def evaluator(config):
 
     if config["SCORING"].lower() == "yes":
         print("I AM SCORE")
+        temporal_max_workers = int(config.get("TEMPORAL_MAX_WORKERS", 4))
+        temporal_max_workers = max(1, temporal_max_workers)
+
         # List to store evaluation results
         results = []
 
+        # Reuse one executor across all rows to avoid pool creation overhead
+        temporal_executor = None
+        if temporal_max_workers > 1:
+            print(f"Using ThreadPoolExecutor with {temporal_max_workers} workers for temporal expression extraction.")
+            temporal_executor = concurrent.futures.ThreadPoolExecutor(max_workers=temporal_max_workers)
+
         # Iterate over the rows of the data to perform evaluations
-        for index, row in gen_data.iterrows():  # Limit processing to 5 rows for demonstration
-            try:
-                print(f"\nProcessing Patient {index}/{len(gen_data)}")
-                print("Processing NER calculation")
-                # Extract named entities from various text columns
-                admission_ner = extract_ner(ner_pipeline, row['syn_admission_report'])
-                discharge_ner = extract_ner(ner_pipeline, row['syn_discharge_report'])
-                clinical_ner = extract_ner(ner_pipeline, row[config["CASE_REPORT_COLUMN_NAME"]])
-                journey_ner = extract_ner(ner_pipeline, row['syn_full_journey'])
+        try:
+            for index, row in gen_data.iterrows():  # Limit processing to 5 rows for demonstration
+                try:
+                    print(f"\nProcessing Patient {index}/{len(gen_data)}")
+                    print("Processing NER calculation")
+                    # Extract named entities from various text columns
+                    admission_ner, discharge_ner, clinical_ner, journey_ner = extract_ner_batch(
+                        ner_pipeline,
+                        [
+                            row["syn_admission_report"],
+                            row["syn_discharge_report"],
+                            row[config["CASE_REPORT_COLUMN_NAME"]],
+                            row["syn_full_journey"],
+                        ],
+                        batch_size=4,
+                    )
+                    # Calculate NER-based similarity scores in parallel
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                        future_admission = executor.submit(ner_similarity, clinical_ner, admission_ner)
+                        future_discharge = executor.submit(ner_similarity, clinical_ner, discharge_ner)
+                        future_journey = executor.submit(ner_similarity, clinical_ner, journey_ner)
 
-                # Calculate NER-based similarity scores
-                ner_similarity_admission = ner_similarity(clinical_ner, admission_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
-                ner_similarity_discharge = ner_similarity(clinical_ner, discharge_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
-                ner_similarity_journey = ner_similarity(clinical_ner, journey_ner, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
+                        ner_similarity_admission = future_admission.result()
+                        ner_similarity_discharge = future_discharge.result()
+                        ner_similarity_journey = future_journey.result()
 
-                print("Processing BERT score calculation")
-                # Calculate BERT scores for text similarity
-                bert_score_admission = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_admission_report']])
-                bert_score_discharge = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_discharge_report']])
-                bert_score_journey = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_full_journey']])
+                    print("Processing BERT score calculation")
+                    # Calculate BERT scores for text similarity
+                    bert_score_admission = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_admission_report']])
+                    bert_score_discharge = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_discharge_report']])
+                    bert_score_journey = calculate_bert_score(bert, [row[config["CASE_REPORT_COLUMN_NAME"]]], [row['syn_full_journey']])
 
-                print("Processing BLEU score calculation")
-                # Calculate BLEU scores for text similarity
-                bleu_score_admission = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
-                bleu_score_discharge = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
-                bleu_score_journey = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
-                
-                # Get temporal expressions from the clinical report
-                temporal_expressions_clinical = get_temporal_expressions(row[config["CASE_REPORT_COLUMN_NAME"]])
-                temporal_expressions_admission = get_temporal_expressions(row['syn_admission_report'])
-                temporal_expressions_discharge = get_temporal_expressions(row['syn_discharge_report'])
-                temporal_expressions_journey = get_temporal_expressions(row['syn_full_journey'])
-                
-                lost_temporal_expressions_admission = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_admission)
-                lost_temporal_expressions_discharge = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_discharge)
-                lost_temporal_expressions_journey = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_journey)
+                    print("Processing BLEU score calculation")
+                    # Calculate BLEU scores for text similarity
+                    bleu_score_admission = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_admission_report'])
+                    bleu_score_discharge = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_discharge_report'])
+                    bleu_score_journey = calculate_bleu_score(bleu, row[config["CASE_REPORT_COLUMN_NAME"]], row['syn_full_journey'])
+                    """
+                    # Get temporal expressions from the clinical report (configurable parallelism)
+                    if temporal_executor is not None:
+                        fut_clinical = temporal_executor.submit(get_temporal_expressions, row[config["CASE_REPORT_COLUMN_NAME"]])
+                        fut_admission = temporal_executor.submit(get_temporal_expressions, row['syn_admission_report'])
+                        fut_discharge = temporal_executor.submit(get_temporal_expressions, row['syn_discharge_report'])
+                        fut_journey = temporal_executor.submit(get_temporal_expressions, row['syn_full_journey'])
 
-                # Append the results for this row to the results list
-                results.append({
-                    'extracted_clinical_ner': json.dumps(list(clinical_ner), ensure_ascii=False),
-                    'extracted_admission_ner': json.dumps(list(admission_ner), ensure_ascii=False),
-                    'extracted_discharge_ner': json.dumps(list(discharge_ner), ensure_ascii=False),
-                    'extracted_journey_ner': json.dumps(list(journey_ner), ensure_ascii=False),
-                    
-                    'admission_ner1_similarity': ner_similarity_admission['strict']['ner1_in_ner2'],
-                    'admission_ner1_similarity_relaxed': ner_similarity_admission['relaxed']['ner1_in_ner2'],
-                    
-                    'discharge_ner1_similarity': ner_similarity_discharge['strict']['ner1_in_ner2'],
-                    'discharge_ner1_similarity_relaxed': ner_similarity_discharge['relaxed']['ner1_in_ner2'],
-                    
-                    'full_journey_ner1_similarity': ner_similarity_journey['strict']['ner1_in_ner2'],
-                    'full_journey_ner1_similarity_relaxed': ner_similarity_journey['relaxed']['ner1_in_ner2'],
+                        temporal_expressions_clinical = fut_clinical.result()
+                        temporal_expressions_admission = fut_admission.result()
+                        temporal_expressions_discharge = fut_discharge.result()
+                        temporal_expressions_journey = fut_journey.result()
 
-                    'admission_ner2_similarity': ner_similarity_admission['strict']['ner2_in_ner1'],
-                    'discharge_ner2_similarity': ner_similarity_discharge['strict']['ner2_in_ner1'],
-                    'full_journey_ner2_similarity': ner_similarity_journey['strict']['ner2_in_ner1'],
+                        # Compute lost temporal expressions in parallel
+                        fut_lost_adm = temporal_executor.submit(lost_temporal_expressions, temporal_expressions_clinical, temporal_expressions_admission)
+                        fut_lost_dis = temporal_executor.submit(lost_temporal_expressions, temporal_expressions_clinical, temporal_expressions_discharge)
+                        fut_lost_jour = temporal_executor.submit(lost_temporal_expressions, temporal_expressions_clinical, temporal_expressions_journey)
 
-                    'admission_strict_lost_by_class': ner_similarity_admission['strict']['lost_by_class'],
-                    'admission_relaxed_lost_by_class': ner_similarity_admission['relaxed']['lost_by_class'],
-                    'admission_Lost_in_strict': ner_similarity_admission['lost_types']['Lost_in_strict'],
-                    'admission_recovery_by_relaxed': ner_similarity_admission['lost_types']['Recovered_by_relaxed'],
-                    'admission_Lost_in_both': ner_similarity_admission['lost_types']['Lost_in_both'],
-                    
-                    'discharge_strict_lost_by_class': ner_similarity_discharge['strict']['lost_by_class'],
-                    'discharge_relaxed_lost_by_class': ner_similarity_discharge['relaxed']['lost_by_class'],
-                    'discharge_Lost_in_strict': ner_similarity_discharge['lost_types']['Lost_in_strict'],
-                    'discharge_recovery_by_relaxed': ner_similarity_discharge['lost_types']['Recovered_by_relaxed'],
-                    'discharge_Lost_in_both': ner_similarity_discharge['lost_types']['Lost_in_both'],
-                    
-                    'full_journey_strict_lost_by_class': ner_similarity_journey['strict']['lost_by_class'],
-                    'full_journey_relaxed_lost_by_class': ner_similarity_journey['relaxed']['lost_by_class'],
-                    'full_journey_Lost_in_strict': ner_similarity_journey['lost_types']['Lost_in_strict'],
-                    'full_journey_recovery_by_relaxed': ner_similarity_journey['lost_types']['Recovered_by_relaxed'],
-                    'full_journey_Lost_in_both': ner_similarity_journey['lost_types']['Lost_in_both'],
+                        lost_temporal_expressions_admission = fut_lost_adm.result()
+                        lost_temporal_expressions_discharge = fut_lost_dis.result()
+                        lost_temporal_expressions_journey = fut_lost_jour.result()
+                    else:
+                        temporal_expressions_clinical = get_temporal_expressions(row[config["CASE_REPORT_COLUMN_NAME"]])
+                        temporal_expressions_admission = get_temporal_expressions(row['syn_admission_report'])
+                        temporal_expressions_discharge = get_temporal_expressions(row['syn_discharge_report'])
+                        temporal_expressions_journey = get_temporal_expressions(row['syn_full_journey'])
 
-                    'admission_strict_lost_rate_by_class': ner_similarity_admission['strict']['lost_rate_by_class'], 
-                    'admission_relaxed_lost_rate_by_class': ner_similarity_admission['relaxed']['lost_rate_by_class'],
-                    
-                    'discharge_strict_lost_rate_by_class': ner_similarity_discharge['strict']['lost_rate_by_class'], 
-                    'discharge_relaxed_lost_rate_by_class': ner_similarity_discharge['relaxed']['lost_rate_by_class'],
-                    
-                    'full_journey_strict_lost_rate_by_class': ner_similarity_journey['strict']['lost_rate_by_class'],
-                    'full_journey_relaxed_lost_rate_by_class': ner_similarity_journey['relaxed']['lost_rate_by_class'],
-                    
-                    'clinical_temporal_expressions': list(temporal_expressions_clinical),
-                    'admission_temporal_expressions': list(temporal_expressions_admission),
-                    'discharge_temporal_expressions': list(temporal_expressions_discharge),
-                    'full_journey_temporal_expressions': list(temporal_expressions_journey),
-                    
-                    'lost_temporal_expressions_admission': list(lost_temporal_expressions_admission),
-                    'lost_temporal_expressions_discharge': list(lost_temporal_expressions_discharge),
-                    'lost_temporal_expressions_journey': list(lost_temporal_expressions_journey),
+                        lost_temporal_expressions_admission = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_admission)
+                        lost_temporal_expressions_discharge = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_discharge)
+                        lost_temporal_expressions_journey = lost_temporal_expressions(temporal_expressions_clinical, temporal_expressions_journey)
+                    """
+                    # Append the results for this row to the results list
+                    results.append({
+                        'extracted_clinical_ner': json.dumps(list(clinical_ner), ensure_ascii=False),
+                        'extracted_admission_ner': json.dumps(list(admission_ner), ensure_ascii=False),
+                        'extracted_discharge_ner': json.dumps(list(discharge_ner), ensure_ascii=False),
+                        'extracted_journey_ner': json.dumps(list(journey_ner), ensure_ascii=False),
 
-                    'bert_score_admission': bert_score_admission,
-                    'bert_score_discharge': bert_score_discharge,
-                    'bert_score_full_journey': bert_score_journey,
+                        'admission_ner1_similarity': ner_similarity_admission['strict']['ner1_in_ner2'],
+                        'admission_ner1_similarity_relaxed': ner_similarity_admission['relaxed']['ner1_in_ner2'],
 
-                    'bleu_score_admission': bleu_score_admission,
-                    'bleu_score_discharge': bleu_score_discharge,
-                    'bleu_score_full_journey': bleu_score_journey
-                })
+                        'discharge_ner1_similarity': ner_similarity_discharge['strict']['ner1_in_ner2'],
+                        'discharge_ner1_similarity_relaxed': ner_similarity_discharge['relaxed']['ner1_in_ner2'],
 
-            except KeyError as e:
-                print(f"Warning: Column {e} not found in DataFrame for row {index}. Skipping.")
-                results.append({
+                        'full_journey_ner1_similarity': ner_similarity_journey['strict']['ner1_in_ner2'],
+                        'full_journey_ner1_similarity_relaxed': ner_similarity_journey['relaxed']['ner1_in_ner2'],
+
+                        'admission_ner2_similarity': ner_similarity_admission['strict']['ner2_in_ner1'],
+                        'discharge_ner2_similarity': ner_similarity_discharge['strict']['ner2_in_ner1'],
+                        'full_journey_ner2_similarity': ner_similarity_journey['strict']['ner2_in_ner1'],
+
+                        'admission_strict_lost_by_class': ner_similarity_admission['strict']['lost_by_class'],
+                        'admission_relaxed_lost_by_class': ner_similarity_admission['relaxed']['lost_by_class'],
+                        'admission_Lost_in_strict': ner_similarity_admission['lost_types']['Lost_in_strict'],
+                        'admission_recovery_by_relaxed': ner_similarity_admission['lost_types']['Recovered_by_relaxed'],
+                        'admission_Lost_in_both': ner_similarity_admission['lost_types']['Lost_in_both'],
+
+                        'discharge_strict_lost_by_class': ner_similarity_discharge['strict']['lost_by_class'],
+                        'discharge_relaxed_lost_by_class': ner_similarity_discharge['relaxed']['lost_by_class'],
+                        'discharge_Lost_in_strict': ner_similarity_discharge['lost_types']['Lost_in_strict'],
+                        'discharge_recovery_by_relaxed': ner_similarity_discharge['lost_types']['Recovered_by_relaxed'],
+                        'discharge_Lost_in_both': ner_similarity_discharge['lost_types']['Lost_in_both'],
+
+                        'full_journey_strict_lost_by_class': ner_similarity_journey['strict']['lost_by_class'],
+                        'full_journey_relaxed_lost_by_class': ner_similarity_journey['relaxed']['lost_by_class'],
+                        'full_journey_Lost_in_strict': ner_similarity_journey['lost_types']['Lost_in_strict'],
+                        'full_journey_recovery_by_relaxed': ner_similarity_journey['lost_types']['Recovered_by_relaxed'],
+                        'full_journey_Lost_in_both': ner_similarity_journey['lost_types']['Lost_in_both'],
+
+                        'admission_strict_lost_rate_by_class': ner_similarity_admission['strict']['lost_rate_by_class'],
+                        'admission_relaxed_lost_rate_by_class': ner_similarity_admission['relaxed']['lost_rate_by_class'],
+
+                        'discharge_strict_lost_rate_by_class': ner_similarity_discharge['strict']['lost_rate_by_class'],
+                        'discharge_relaxed_lost_rate_by_class': ner_similarity_discharge['relaxed']['lost_rate_by_class'],
+
+                        'full_journey_strict_lost_rate_by_class': ner_similarity_journey['strict']['lost_rate_by_class'],
+                        'full_journey_relaxed_lost_rate_by_class': ner_similarity_journey['relaxed']['lost_rate_by_class'],
+
+#                        'clinical_temporal_expressions': list(temporal_expressions_clinical),
+#                        'admission_temporal_expressions': list(temporal_expressions_admission),
+#                        'discharge_temporal_expressions': list(temporal_expressions_discharge),
+#                        'full_journey_temporal_expressions': list(temporal_expressions_journey),
+#
+#                        'lost_temporal_expressions_admission': list(lost_temporal_expressions_admission),
+#                        'lost_temporal_expressions_discharge': list(lost_temporal_expressions_discharge),
+#                        'lost_temporal_expressions_journey': list(lost_temporal_expressions_journey),
+
+                        'bert_score_admission': bert_score_admission,
+                        'bert_score_discharge': bert_score_discharge,
+                        'bert_score_full_journey': bert_score_journey,
+
+                        'bleu_score_admission': bleu_score_admission,
+                        'bleu_score_discharge': bleu_score_discharge,
+                        'bleu_score_full_journey': bleu_score_journey
+                    })
+
+                except KeyError as e:
+                    print(f"Warning: Column {e} not found in DataFrame for row {index}. Skipping.")
+                    results.append({
                     'admission_ner1_similarity': np.nan,
                     'discharge_ner1_similarity': np.nan,
                     'full_journey_ner1_similarity': np.nan,
@@ -525,10 +619,10 @@ def evaluator(config):
                     'bleu_score_admission': None,
                     'bleu_score_discharge': None,
                     'bleu_score_full_journey': None
-                })
-            except Exception as e:
-                print(f"An unexpected error occurred: {e}")
-                results.append({
+                    })
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
+                    results.append({
                     'admission_ner1_similarity': np.nan,
                     'discharge_ner1_similarity': np.nan,
                     'full_journey_ner1_similarity': np.nan,
@@ -581,7 +675,10 @@ def evaluator(config):
                     'bleu_score_admission': None,
                     'bleu_score_discharge': None,
                     'bleu_score_full_journey': None
-                })
+                    })
+        finally:
+            if temporal_executor is not None:
+                temporal_executor.shutdown(wait=True)
 
         # Append evaluation results to the original data
         gen_data = pd.concat([gen_data, pd.DataFrame(results)], axis=1)

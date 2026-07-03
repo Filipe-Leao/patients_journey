@@ -4,10 +4,8 @@ import pandas as pd
 import os
 import torch
 import re
-#from transformers import pipeline, GenerationConfig
+from transformers import AutoTokenizer
 from huggingface_hub import snapshot_download
-from bert_score import score
-from sacrebleu.metrics import BLEU
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from vllm import LLM, SamplingParams
@@ -44,18 +42,31 @@ def load_pipeline(config):
             local_dir=LOCAL_DIR,
             local_dir_use_symlinks=False
         )
+        
     
     return LLM(
         model=LOCAL_DIR,
         tensor_parallel_size=num_gpus,
-#        dtype="auto",
-#        max_model_len=32000,           # cover 24 146 + some headroom for output
-#        gpu_memory_utilization=0.90,
-#        enable_prefix_caching=True,
-#        enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
-#        max_num_batched_tokens=2048,   # reduce chunk size for better batching
-#        max_num_seqs=16,               # further reduce for diversity
+        dtype="auto",
+        tokenizer_mode="auto",
+        max_model_len=32000,           # cover 24 146 + some headroom for output
+        gpu_memory_utilization=0.90,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,   # essential for long contexts — avoids OOM
+        max_num_batched_tokens=4098,   # reduce chunk size for better batching
+        #max_num_seqs=16,               # further reduce for diversity
     )
+    
+ 
+#pip install pandas torch transformers numpy bert-score sacrebleu scikit-learn huggingface-hub vllm py-heideltime
+    
+#ml OpenMPI/5.0.3-GCC-13.3.0
+#ml NCCL/2.20.5-GCCcore-13.3.0-CUDA-12.4.0
+
+#ml CUDA/11.8.0
+#ml cuDNN/8.7.0.84-CUDA-11.8.0
+#ml NCCL/2.18.5-GCCcore-11.3.0-CUDA-11.8.0
+#ml PyTorch/1.13.1-foss-2022a-CUDA-11.8.0
 
 def generate_text_with_local_model_batch(
     model: LLM,
@@ -72,24 +83,6 @@ def generate_text_with_local_model_batch(
         repetition_penalty=1.1,
     )
 
-    # Constrói os prompts com o chat template
-    # if QWEN:
-    #   tokenizer.apply_chat_template(
-    #        [
-    #            {"role": "system", "content": "/no_think"},
-    #            {"role": "user",   "content": prompt},
-    #        ],
-    #        tokenize=False,
-    #        add_generation_prompt=True,
-    #    )
-    # if BioMistral:
-    #   tokenizer.apply_chat_template(
-    #        [
-    #            {"role": "user",   "content": prompt},
-    #        ],
-    #        tokenize=False,
-    #        add_generation_prompt=True,
-    #    )
     tokenizer = model.get_tokenizer()
     formatted = [
         tokenizer.apply_chat_template(
@@ -129,10 +122,10 @@ def admission_report_generation(model, config):
                 2. Include only symptoms, signs, and relevant history of previous diseases,
                    using appropriate medical abbreviations (e.g., HTA, DM),
                 3. Do not include treatment details, exam results, specific diagnoses, or follow-up treatments,
-                4. Conclude the report with an indication of the initial treatment provided, 
+                4. Conclude the report with an indication of the initial treatment provided, specifying the administered dose, but avoid explicitly labelling this section as 'initial treatment.'
                 5. Include time-related information, such as the duration of the hospital stay, and the dates of key events (e.g., admission, medicine administration).
 
-            specifying the administered dose, but avoid explicitly labelling this section as 'initial treatment.'
+            
             Ensure the report is in {config["GEN_LANGUAGE"]}
             and feels authentic, mimicking how a doctor might write the admission scenario. 
             Also remember, doctors can make simple mistakes while writing (e.g., typographical mistakes).
@@ -323,7 +316,8 @@ def discharge_report_generation(model, config):
 def patients_full_journey(model, config):
     def generate_report(index, admission_report, discharge_report, config):
         prompt = f"""
-        "{admission_report}" and "{discharge_report}"
+        Admission Report: "{admission_report}"
+        Discharge Report: "{discharge_report}"
 
         Based on the admission and discharge reports provided, generate a detailed 
         report of the patient's full journey during their hospital stay. 
